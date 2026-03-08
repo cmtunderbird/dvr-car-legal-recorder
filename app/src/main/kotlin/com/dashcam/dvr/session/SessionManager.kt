@@ -19,6 +19,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import com.dashcam.dvr.evidence.SealResult
 
 /**
  * SessionManager
@@ -308,6 +309,25 @@ class SessionManager(private val context: Context) {
      * ROAD_IMPACT events (confirmed=false) are NOT written to custody —
      * they appear in telemetry.log only.
      */
+
+    /**
+     * Updates session.json with seal results from EvidencePackager.
+     * Called after EvidencePackager.seal() completes successfully.
+     * These fields are informational only; the authoritative integrity proof
+     * is manifest.json + signature + tsa_response.tsr.
+     */
+    fun patchSealResult(sessionDir: File, result: SealResult) {
+        mutateSessionJson(sessionDir) { meta ->
+            meta.copy(
+                tsaStatus    = result.tsaStatus,
+                signingKeyId = AppConstants.KEYSTORE_ALIAS,
+                manifestHash = result.manifestHash,
+                sealedTs     = result.sealedTs
+            )
+        }
+        Log.i(TAG, "session.json patched with seal result  tsa=${result.tsaStatus}  hash=${result.manifestHash}")
+    }
+
     fun appendCustodyEvent(sessionDir: File, event: ImpactEvent) {
         if (!event.confirmed) return
         try {

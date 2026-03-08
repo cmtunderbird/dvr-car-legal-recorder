@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import com.dashcam.dvr.evidence.EvidencePackager
 
 /**
  * RecordingService — Foreground Service
@@ -338,8 +339,17 @@ class RecordingService : LifecycleService() {
                 sessionManager.closeSession(dir, "USER_STOP")
             }
 
-            // ── Module 6 placeholder ──────────────────────────────────────────────────
-            // evidencePackager.seal(currentSessionDir)   wired in Module 6
+            // Module 6: seal the evidence package (hash → sign → TSA)
+            // Runs on the IO dispatcher — network for TSA is acceptable here.
+            currentSessionDir?.let { dir ->
+                val sealResult = EvidencePackager.seal(dir, sessionManager.installationUuid)
+                if (sealResult != null) {
+                    sessionManager.patchSealResult(dir, sealResult)
+                    Log.i(TAG, "Evidence sealed  tsa=${sealResult.tsaStatus}  files=${sealResult.fileCount}  hash=${sealResult.manifestHash?.take(16)}...")
+                } else {
+                    Log.e(TAG, "EvidencePackager.seal() returned null — session NOT sealed")
+                }
+            }
 
             if (telemetryEngine.ntpSyncStatus != "SYNCED")
                 Log.w(TAG, "Session CLOCK_UNVERIFIED — ${telemetryEngine.ntpSyncStatus}")

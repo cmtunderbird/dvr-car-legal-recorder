@@ -65,6 +65,16 @@ data class SessionMetadata(
     /** "OK" | "SLOW" (<14 MB/s) | "LOW_SPACE" (<10 GB) | "CRITICAL" (both) */
     @SerializedName("storage_health")           val storageHealth:         String,
 
+    // -- Evidence Integrity (Module 6 - EvidencePackager) --------------------------------
+    /** "TIMESTAMPED" | "TSA_UNAVAILABLE" | "TSA_ERROR" | "PENDING" | null = not sealed */
+    @SerializedName("tsa_status")        val tsaStatus:           String? = null,
+    /** Android Keystore alias used to sign this session */
+    @SerializedName("signing_key_id")    val signingKeyId:        String? = null,
+    /** SHA-256 hex of the final manifest.json */
+    @SerializedName("manifest_hash")     val manifestHash:        String? = null,
+    /** ISO-8601 UTC when EvidencePackager.seal() completed */
+    @SerializedName("sealed_ts_utc")     val sealedTs:            String? = null,
+
     // ── Navigation Integration (Addon v1.0 §A.6) ─────────────────────────────
     /** Pre-declared at session open; populated by NavigationEngine (Module 9). */
     @SerializedName("nav_integration")  val navIntegration: NavIntegrationFields = NavIntegrationFields()

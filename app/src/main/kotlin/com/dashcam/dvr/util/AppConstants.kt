@@ -120,4 +120,12 @@ object AppConstants {
 
     // ── Events log ────────────────────────────────────────────────────────────
     const val EVENTS_FILENAME = "events.log"
+
+    // ── Module 6 — Evidence Packager ──────────────────────────────────────────
+    /** RFC 3161 TSA response token stored alongside the signature */
+    const val TSA_TOKEN_FILENAME       = "tsa_response.tsr"
+    /** Public key export — written once on first seal; send to key server */
+    const val KEY_CERTIFICATE_FILENAME = "key_certificate.json"
+    /** Primary TSA endpoint (DigiCert public free TSA) */
+    const val TSA_URL_PRIMARY          = "http://timestamp.digicert.com"
 }
