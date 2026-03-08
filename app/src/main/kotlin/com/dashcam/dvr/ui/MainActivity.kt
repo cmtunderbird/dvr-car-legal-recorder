@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
-import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
@@ -26,23 +25,10 @@ import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-/**
- * MainActivity — Updated for Module 2
- *
- * Changes from Module 1:
- *  - DVRCameraManager injected and started
- *  - Live dual-camera preview wired to PreviewViews
- *  - Camera validation runs at startup
- *  - GPS status placeholder shown
- *  - Record / Stop / Event buttons wired to RecordingService
- */
 class MainActivity : AppCompatActivity() {
 
-    companion object {
-        private const val TAG = "MainActivity"
-    }
+    companion object { private const val TAG = "MainActivity" }
 
-    // ── Views ──────────────────────────────────────────────────────────────
     private lateinit var previewRear   : PreviewView
     private lateinit var previewFront  : PreviewView
     private lateinit var tvTimer       : TextView
@@ -51,11 +37,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnRecord     : MaterialButton
     private lateinit var btnEvent      : MaterialButton
 
-    // ── Camera ─────────────────────────────────────────────────────────────
-    private lateinit var cameraManager : DVRCameraManager
+    private lateinit var cameraManager  : DVRCameraManager
     private lateinit var cameraValidator: CameraValidator
 
-    // ── Service ────────────────────────────────────────────────────────────
     private var recordingService: RecordingService? = null
     private var serviceBound = false
 
@@ -72,48 +56,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Permissions ────────────────────────────────────────────────────────
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        if (results.values.all { it }) {
-            onPermissionsReady()
-        } else {
-            Toast.makeText(this,
-                "Camera and location permissions are required", Toast.LENGTH_LONG).show()
-        }
+        if (results.values.all { it }) onPermissionsReady()
+        else Toast.makeText(this, "Camera and location permissions are required", Toast.LENGTH_LONG).show()
     }
 
-    // ══════════════════════════════════════════════════════════════════════
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
-
         bindViews()
         setupClickListeners()
-
         cameraManager   = DVRCameraManager(this)
         cameraValidator = CameraValidator(this)
-
         checkAndRequestPermissions()
     }
 
     override fun onStart() {
         super.onStart()
-        bindService(
-            Intent(this, RecordingService::class.java),
-            serviceConnection,
-            BIND_AUTO_CREATE
-        )
+        bindService(Intent(this, RecordingService::class.java), serviceConnection, BIND_AUTO_CREATE)
     }
 
     override fun onStop() {
         super.onStop()
-        if (serviceBound) {
-            unbindService(serviceConnection)
-            serviceBound = false
-        }
+        if (serviceBound) { unbindService(serviceConnection); serviceBound = false }
     }
 
     override fun onDestroy() {
@@ -121,33 +89,30 @@ class MainActivity : AppCompatActivity() {
         cameraManager.stopAll()
     }
 
-    // ── View binding ───────────────────────────────────────────────────────
     private fun bindViews() {
-        previewRear    = findViewById(R.id.previewRear)
-        previewFront   = findViewById(R.id.previewFront)
-        tvTimer        = findViewById(R.id.tvTimer)
-        tvGpsStatus    = findViewById(R.id.tvGpsStatus)
-        tvCameraStatus = findViewById(R.id.tvCameraStatus)
-        btnRecord      = findViewById(R.id.btnRecord)
-        btnEvent       = findViewById(R.id.btnEvent)
+        previewRear     = findViewById(R.id.previewRear)
+        previewFront    = findViewById(R.id.previewFront)
+        tvTimer         = findViewById(R.id.tvTimer)
+        tvGpsStatus     = findViewById(R.id.tvGpsStatus)
+        tvCameraStatus  = findViewById(R.id.tvCameraStatus)
+        btnRecord       = findViewById(R.id.btnRecord)
+        btnEvent        = findViewById(R.id.btnEvent)
     }
 
     private fun setupClickListeners() {
         btnRecord.setOnClickListener {
-            if (recordingService?.state?.value is RecordingService.ServiceState.Recording) {
+            if (recordingService?.state?.value is RecordingService.ServiceState.Recording)
                 RecordingService.stopRecording(this)
-            } else {
+            else
                 RecordingService.startRecording(this)
-            }
         }
-
         btnEvent.setOnClickListener {
             RecordingService.triggerManualEvent(this)
             Toast.makeText(this, "⚡ Event saved!", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // ── Permissions ────────────────────────────────────────────────────────
+
     private fun checkAndRequestPermissions() {
         val required = buildList {
             add(Manifest.permission.CAMERA)
@@ -162,8 +127,7 @@ class MainActivity : AppCompatActivity() {
         val missing = required.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) onPermissionsReady()
-        else permissionLauncher.launch(missing.toTypedArray())
+        if (missing.isEmpty()) onPermissionsReady() else permissionLauncher.launch(missing.toTypedArray())
     }
 
     private fun onPermissionsReady() {
@@ -172,19 +136,12 @@ class MainActivity : AppCompatActivity() {
         startDualPreview()
     }
 
-    // ── Camera validation ──────────────────────────────────────────────────
     private fun runCameraValidation() {
         lifecycleScope.launch {
             val result = cameraValidator.validate()
             if (!result.isViable) {
                 tvCameraStatus.text = "⚠️ Camera issue detected"
-                tvCameraStatus.setTextColor(
-                    ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
-                Toast.makeText(
-                    this@MainActivity,
-                    "Camera validation failed — check logcat",
-                    Toast.LENGTH_LONG
-                ).show()
+                tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
             } else {
                 val dual = if (result.hasDualCameras) "Dual ✅" else "Single ⚠️"
                 tvCameraStatus.text = "$dual | ${if (result.rearSupportsFullLevel) "FULL" else "LIMITED"}"
@@ -192,48 +149,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Dual camera preview ────────────────────────────────────────────────
     private fun startDualPreview() {
         lifecycleScope.launch {
             try {
                 tvCameraStatus.text = "Starting cameras…"
-
-                // Enumerate first so we know what hardware we have
                 val (rear, front) = cameraManager.enumerateCameras()
-                Log.i(TAG, "Rear: $rear")
-                Log.i(TAG, "Front: $front")
-
-                // Start live previews
                 cameraManager.startPreview(
-                    lifecycleOwner  = this@MainActivity,
-                    rearPreviewView = previewRear,
+                    lifecycleOwner   = this@MainActivity,
+                    rearPreviewView  = previewRear,
                     frontPreviewView = previewFront
                 )
-
-                // Update status
                 val rearId  = rear?.logicalId  ?: "N/A"
                 val frontId = front?.logicalId ?: "N/A"
                 tvCameraStatus.text = "📷 R:$rearId  F:$frontId"
-                Log.i(TAG, "Dual preview live — Rear:$rearId Front:$frontId")
-
             } catch (e: Exception) {
                 Log.e(TAG, "Camera start failed: ${e.message}", e)
                 tvCameraStatus.text = "❌ ${e.message}"
             }
         }
 
-        // Observe camera state changes
         lifecycleScope.launch {
             cameraManager.state.collectLatest { state ->
                 when (state) {
-                    is DVRCameraManager.CameraState.Previewing -> {
-                        tvCameraStatus.setTextColor(
-                            ContextCompat.getColor(this@MainActivity, R.color.dvr_teal))
-                    }
+                    is DVRCameraManager.CameraState.Previewing ->
+                        tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_teal))
                     is DVRCameraManager.CameraState.Error -> {
                         tvCameraStatus.text = "❌ ${state.message}"
-                        tvCameraStatus.setTextColor(
-                            ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
+                        tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
                     }
                     else -> {}
                 }
@@ -241,8 +183,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Service state ──────────────────────────────────────────────────────
     private fun observeServiceState() {
+        // ── Recording state → button + colour ─────────────────────────────
         lifecycleScope.launch {
             recordingService?.state?.collectLatest { state ->
                 when (state) {
@@ -259,12 +201,21 @@ class MainActivity : AppCompatActivity() {
                         btnEvent.isEnabled = false
                         tvTimer.text = "00:00:00"
                     }
-                    is RecordingService.ServiceState.Error -> {
+                    is RecordingService.ServiceState.Error ->
                         Toast.makeText(this@MainActivity,
                             "DVR Error: ${state.message}", Toast.LENGTH_LONG).show()
-                    }
                     else -> {}
                 }
+            }
+        }
+
+        // ── Timer — driven by elapsedSeconds from the service ──────────────
+        lifecycleScope.launch {
+            recordingService?.elapsedSeconds?.collectLatest { secs ->
+                val h = secs / 3600
+                val m = (secs % 3600) / 60
+                val s = secs % 60
+                tvTimer.text = "%02d:%02d:%02d".format(h, m, s)
             }
         }
     }

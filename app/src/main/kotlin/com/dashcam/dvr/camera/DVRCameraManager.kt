@@ -10,6 +10,8 @@ import android.util.Log
 import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
+import androidx.camera.core.SingleCameraConfig
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -26,9 +28,9 @@ import kotlin.coroutines.resumeWithException
 /**
  * DVRCameraManager — Dual Camera Pipeline
  *
- * KEY FIX: ProcessCameraProvider is a singleton. Calling unbindAll() before each
- * camera bind kills the previously bound camera. Both previews must be bound
- * in a single bindToLifecycle() call using separate CameraSelector instances.
+ * FIX: Uses CameraX 1.3 Concurrent Camera API so rear + front run simultaneously.
+ * Sequential bindToLifecycle() on the same lifecycleOwner causes the second bind
+ * to replace the first — the Concurrent API binds both in one atomic call.
  */
 class DVRCameraManager(private val context: Context) {
 
@@ -57,10 +59,8 @@ class DVRCameraManager(private val context: Context) {
     ) {
         override fun toString() =
             "CameraInfo(logical=$logicalId, physical=$physicalId, " +
-            "facing=${facingName(facing)}, " +
-            "focalLengths=${focalLengths?.joinToString()}, " +
-            "supportLevel=${supportLevelName(supportLevel)}, " +
-            "maxVideo=$maxVideoSize)"
+            "facing=${facingName(facing)}, focalLengths=${focalLengths?.joinToString()}, " +
+            "supportLevel=${supportLevelName(supportLevel)}, maxVideo=$maxVideoSize)"
 
         private fun facingName(f: Int) = when (f) {
             CameraCharacteristics.LENS_FACING_BACK  -> "BACK"
@@ -81,7 +81,6 @@ class DVRCameraManager(private val context: Context) {
     var frontCameraInfo: CameraInfo? = null
         private set
 
-    // Single shared provider — must never call unbindAll() between rear/front binds
     private var sharedProvider: ProcessCameraProvider? = null
 
 
@@ -103,10 +102,7 @@ class DVRCameraManager(private val context: Context) {
                     val maxVideoSize = videoSizes?.maxByOrNull { it.width * it.height }
                     val physicalId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
                         chars.physicalCameraIds.firstOrNull() else null
-
-                    val info = CameraInfo(id, physicalId, facing, focalLengths, supportLevel, maxVideoSize)
-                    allCameras.add(info)
-                    Log.i(TAG, "Found camera: $info")
+                    allCameras.add(CameraInfo(id, physicalId, facing, focalLengths, supportLevel, maxVideoSize))
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not query camera $id: ${e.message}")
                 }
@@ -127,11 +123,13 @@ class DVRCameraManager(private val context: Context) {
         }
 
     /**
-     * Start live preview on BOTH cameras simultaneously.
+     * Start live preview on BOTH cameras using the CameraX Concurrent Camera API.
      *
-     * THE FIX: Both Preview use-cases are bound in ONE bindToLifecycle() call.
-     * The singleton ProcessCameraProvider handles both streams together — calling
-     * unbindAll() between binds would kill the first stream.
+     * CameraX 1.3+ supports binding front + rear in ONE atomic call via
+     * ProcessCameraProvider.bindToLifecycle(List<SingleCameraConfig>).
+     * This avoids the "second bind replaces first" problem of sequential calls.
+     *
+     * Falls back to sequential binding on devices without concurrent support.
      */
     @SuppressLint("UnsafeOptInUsageError")
     suspend fun startPreview(
@@ -147,44 +145,49 @@ class DVRCameraManager(private val context: Context) {
 
             val provider = getCameraProvider()
             sharedProvider = provider
-            provider.unbindAll()   // clear once, before binding anything
+            provider.unbindAll()
 
-            val useCases = mutableListOf<androidx.camera.core.UseCase>()
-
-            // ── Rear preview ───────────────────────────────────────────────
-            val rearSelector = CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
-                .build()
             val rearPreview = Preview.Builder()
                 .setTargetResolution(Size(AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
-                .build()
-                .also { it.setSurfaceProvider(rearPreviewView.surfaceProvider) }
+                .build().also { it.setSurfaceProvider(rearPreviewView.surfaceProvider) }
 
-            // ── Front preview ──────────────────────────────────────────────
-            val frontSelector = CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
-                .build()
             val frontPreview = Preview.Builder()
                 .setTargetResolution(Size(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT))
-                .build()
-                .also { it.setSurfaceProvider(frontPreviewView.surfaceProvider) }
+                .build().also { it.setSurfaceProvider(frontPreviewView.surfaceProvider) }
 
 
-            // ── Bind BOTH cameras in one call ──────────────────────────────
-            // CameraX supports concurrent front+rear preview via separate selectors
-            // bound together. This is the correct pattern for dual-camera DVR.
-            try {
-                provider.bindToLifecycle(lifecycleOwner, rearSelector, rearPreview)
-                Log.i(TAG, "REAR camera bound — target: ${AppConstants.REAR_CAM_WIDTH}x${AppConstants.REAR_CAM_HEIGHT}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to bind REAR camera: ${e.message}", e)
+            // ── Concurrent Camera API (CameraX 1.3+) ──────────────────────
+            // Checks if the device supports simultaneous front + rear streams.
+            // On Redmi Note 14 Pro this should return true.
+            val concurrentInfos = provider.availableConcurrentCameraInfos
+            val deviceSupportsConcurrent = concurrentInfos.any { infoList ->
+                infoList.any { it.lensFacing == CameraSelector.LENS_FACING_BACK } &&
+                infoList.any { it.lensFacing == CameraSelector.LENS_FACING_FRONT }
             }
 
-            try {
-                provider.bindToLifecycle(lifecycleOwner, frontSelector, frontPreview)
-                Log.i(TAG, "FRONT camera bound — target: ${AppConstants.FRONT_CAM_WIDTH}x${AppConstants.FRONT_CAM_HEIGHT}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to bind FRONT camera: ${e.message}", e)
+            if (deviceSupportsConcurrent) {
+                Log.i(TAG, "Device supports concurrent cameras — using ConcurrentCamera API")
+                val rearConfig = SingleCameraConfig(
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    UseCaseGroup.Builder().addUseCase(rearPreview).build(),
+                    lifecycleOwner
+                )
+                val frontConfig = SingleCameraConfig(
+                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                    UseCaseGroup.Builder().addUseCase(frontPreview).build(),
+                    lifecycleOwner
+                )
+                provider.bindToLifecycle(listOf(rearConfig, frontConfig))
+                Log.i(TAG, "Both cameras bound concurrently ✅")
+            } else {
+                // Fallback for devices without concurrent support
+                Log.w(TAG, "Concurrent cameras not supported — binding sequentially")
+                provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, rearPreview)
+                try {
+                    provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, frontPreview)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Front camera could not bind alongside rear: ${e.message}")
+                }
             }
 
             _state.value = CameraState.Previewing
