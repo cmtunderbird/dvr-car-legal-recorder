@@ -52,8 +52,6 @@ class RecordingService : LifecycleService() {
         private const val TAG            = "RecordingService"
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────
-
     override fun onCreate() {
         super.onCreate()
         startService(Intent(applicationContext, RecordingService::class.java))
@@ -80,9 +78,6 @@ class RecordingService : LifecycleService() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // App swiped from recents — reset so next launch starts clean.
-        // Without this the service survives with Recording state; next Activity bind
-        // fires the observer immediately before cameras initialise → "camera not ready".
         Log.i(TAG, "onTaskRemoved — resetting to Idle")
         timerJob?.cancel(); timerJob = null
         releaseWakeLock()
@@ -100,6 +95,22 @@ class RecordingService : LifecycleService() {
     }
 
     // ── Public API ────────────────────────────────────────────────────────
+
+    /**
+     * Force-reset to Idle.
+     * Called by MainActivity.onServiceConnected() when it finds the service
+     * already in Recording state with no camera session — this happens on HyperOS
+     * because the service process survives after the app is killed/restarted,
+     * retaining the old Recording state but with no live camera attached.
+     */
+    fun resetToIdle() {
+        Log.w(TAG, "resetToIdle() — clearing orphaned state (was: ${_state.value})")
+        timerJob?.cancel(); timerJob = null
+        releaseWakeLock()
+        _state.value = ServiceState.Idle
+        _elapsedSeconds.value = 0L
+        updateNotification("DVR Ready")
+    }
 
     fun startRecording() {
         if (_state.value is ServiceState.Recording || _state.value is ServiceState.Starting) return

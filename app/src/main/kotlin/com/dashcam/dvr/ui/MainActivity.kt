@@ -48,17 +48,33 @@ class MainActivity : AppCompatActivity() {
     private var recordingService      : RecordingService? = null
     private var serviceBound          = false
     private var currentSessionDir     : File? = null
-    private var stateObserversStarted = false   // prevent duplicate observers on rebind
+    private var stateObserversStarted = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            recordingService = (binder as RecordingService.RecordingBinder).getService()
+            val svc = (binder as RecordingService.RecordingBinder).getService()
+            recordingService = svc
             serviceBound = true
+
+            // ── Orphan guard ──────────────────────────────────────────────
+            // On HyperOS, the service process survives app kill/restart.
+            // If it's in Recording state but THIS Activity has no camera session,
+            // that state is orphaned (the old camera is gone). Reset immediately
+            // before observers start — otherwise the observer fires Recording and
+            // calls startVideoRecording() before cameras have initialised.
+            val isOrphaned = (svc.state.value is RecordingService.ServiceState.Recording ||
+                              svc.state.value is RecordingService.ServiceState.Starting) &&
+                             currentSessionDir == null
+            if (isOrphaned) {
+                Log.w(TAG, "Orphaned Recording state detected on bind — resetting to Idle")
+                svc.resetToIdle()
+            }
+
             if (!stateObserversStarted) {
                 stateObserversStarted = true
                 observeServiceState()
             }
-            Log.d(TAG, "Bound to RecordingService")
+            Log.d(TAG, "Bound to RecordingService (state=${svc.state.value})")
         }
         override fun onServiceDisconnected(name: ComponentName) {
             recordingService = null
@@ -133,36 +149,28 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Service not ready", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-
             if (svc.state.value is RecordingService.ServiceState.Recording) {
-                // ── STOP ──────────────────────────────────────────────────
-                // Stop camera first (finalises file), then stop service timer
+                // STOP: camera first, then service
                 cameraManager.stopVideoRecording()
                 currentSessionDir?.let { Log.i(TAG, "Session closed: ${it.absolutePath}") }
                 currentSessionDir = null
                 svc.stopRecording()
-
             } else {
-                // ── START ─────────────────────────────────────────────────
-                // Camera must be in Previewing state before we can record.
-                // startPreview() is called from onPermissionsReady() at launch;
-                // by the time the user taps Record the provider is always ready.
+                // START: camera first, then service (only if camera succeeds)
                 val sessionDir = createSessionDir().also { currentSessionDir = it }
                 val ok = cameraManager.startVideoRecording(sessionDir)
                 if (ok) {
                     svc.startRecording()
-                    Log.i(TAG, "Recording started → ${sessionDir.name}")
+                    Log.i(TAG, "Recording → ${sessionDir.name}")
                 } else {
-                    // Camera not ready (e.g. app opened but preview not yet bound)
                     sessionDir.delete()
                     currentSessionDir = null
                     Toast.makeText(this,
-                        "Cameras still initialising — try again in a moment",
+                        "Cameras still initialising — wait a moment and try again",
                         Toast.LENGTH_SHORT).show()
                 }
             }
         }
-
         btnEvent.setOnClickListener {
             recordingService?.triggerEvent()
             Toast.makeText(this, "Event saved!", Toast.LENGTH_SHORT).show()
@@ -242,9 +250,7 @@ class MainActivity : AppCompatActivity() {
         return File(base, "${AppConstants.SESSION_DIR_PREFIX}$ts").also { it.mkdirs() }
     }
 
-    // ── Service state observer — UI ONLY, no camera calls ────────────────
-    // Recording start/stop is driven by the button handler above.
-    // The observer only updates button appearance and timer display.
+    // ── Service observer — UI only ────────────────────────────────────────
 
     private fun observeServiceState() {
         lifecycleScope.launch {
