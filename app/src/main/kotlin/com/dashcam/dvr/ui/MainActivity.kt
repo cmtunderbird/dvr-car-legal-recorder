@@ -28,20 +28,15 @@ import kotlinx.coroutines.launch
 /**
  * MainActivity
  *
- * SERVICE STARTUP — startForegroundService() + bindService() in onStart():
+ * SERVICE BINDING — bindService() ONLY, never startForegroundService():
  *
- * Android 14 requires a service to be properly *started* (via startForegroundService)
- * before startForeground() is valid. BIND_AUTO_CREATE alone creates the service but
- * doesn't satisfy this requirement — startForeground() silently fails or throws.
+ * startForegroundService() from onStart() causes an INFINITE LOOP on HyperOS:
+ *   onStart() → startForegroundService() → HyperOS banner → app minimizes
+ *   → onStop() → user returns → onStart() → banner again → loop forever
  *
- * Fix: call startForegroundService() in onStart() so the service is both started
- * AND bound. The HyperOS privacy banner fires ONCE at app launch while you're
- * already looking at the screen — safe. Button press is a pure binder call — no
- * system events, no banner, no minimize.
- *
- * onStop() UNBIND GUARD — covers Starting + Stopping too:
- * If any system event (banner, screen-off) triggers onStop() while state is
- * transitioning, we must NOT unbind or the service dies mid-start.
+ * Fix: Activity calls bindService(BIND_AUTO_CREATE) only.
+ * The service promotes itself to foreground from its own onCreate() —
+ * no Activity involvement, no banner loop.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -61,13 +56,12 @@ class MainActivity : AppCompatActivity() {
     private var recordingService: RecordingService? = null
     private var serviceBound = false
 
-
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             recordingService = (binder as RecordingService.RecordingBinder).getService()
             serviceBound = true
             observeServiceState()
-            Log.d(TAG, "Bound to RecordingService ✅")
+            Log.d(TAG, "Bound to RecordingService")
         }
         override fun onServiceDisconnected(name: ComponentName) {
             recordingService = null
@@ -83,7 +77,7 @@ class MainActivity : AppCompatActivity() {
         else Toast.makeText(this, "Camera and location permissions are required", Toast.LENGTH_LONG).show()
     }
 
-    // ── Lifecycle ──────────────────────────────────────────────────────────
+    // ── Lifecycle ─────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,22 +92,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        // 1. startForegroundService() — satisfies Android 14's requirement that the service
-        //    be *started* before startForeground() is valid. The HyperOS privacy banner
-        //    fires here, at app startup, not on button press.
-        // 2. bindService() — gets us the binder for direct method calls.
-        // Both calls are safe to repeat if service is already running.
-        val svcIntent = Intent(this, RecordingService::class.java)
-        startForegroundService(svcIntent)
+        // bindService ONLY — never startForegroundService() here.
+        // The service promotes itself to foreground from its own onCreate().
+        // Calling startForegroundService() here creates an infinite banner loop on HyperOS.
         if (!serviceBound) {
-            bindService(svcIntent, serviceConnection, BIND_AUTO_CREATE)
+            bindService(
+                Intent(this, RecordingService::class.java),
+                serviceConnection,
+                BIND_AUTO_CREATE
+            )
         }
     }
 
     override fun onStop() {
         super.onStop()
-        // Guard ALL active states — Starting and Stopping are transitional and must
-        // not be interrupted by an unbind (e.g. if HyperOS briefly backgrounds us).
+        // Keep binding alive during any active state (Starting, Recording, Stopping).
         val state = recordingService?.state?.value
         val isActive = state is RecordingService.ServiceState.Recording ||
                        state is RecordingService.ServiceState.Starting  ||
@@ -133,7 +126,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Views & click listeners ────────────────────────────────────────────
+    // ── Views & Clicks ────────────────────────────────────────────────────
 
     private fun bindViews() {
         previewRear     = findViewById(R.id.previewRear)
@@ -148,7 +141,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupClickListeners() {
         btnRecord.setOnClickListener {
             val svc = recordingService ?: run {
-                Toast.makeText(this, "Service not ready — please wait", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Service not ready", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             if (svc.state.value is RecordingService.ServiceState.Recording)
@@ -158,22 +151,23 @@ class MainActivity : AppCompatActivity() {
         }
         btnEvent.setOnClickListener {
             recordingService?.triggerEvent()
-            Toast.makeText(this, "⚡ Event saved!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Event saved!", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // ── Permissions ────────────────────────────────────────────────────────
+    // ── Permissions ───────────────────────────────────────────────────────
 
     private fun checkAndRequestPermissions() {
         val required = buildList {
             add(Manifest.permission.CAMERA)
+            add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.ACCESS_FINE_LOCATION)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 add(Manifest.permission.POST_NOTIFICATIONS)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 add(Manifest.permission.READ_MEDIA_VIDEO)
-            } else {
+            else
                 add(Manifest.permission.READ_EXTERNAL_STORAGE)
-            }
         }
         val missing = required.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -188,16 +182,16 @@ class MainActivity : AppCompatActivity() {
         startDualPreview()
     }
 
-    // ── Camera ─────────────────────────────────────────────────────────────
+    // ── Camera ────────────────────────────────────────────────────────────
 
     private fun runCameraValidation() {
         lifecycleScope.launch {
             val result = cameraValidator.validate()
             if (!result.isViable) {
-                tvCameraStatus.text = "⚠️ Camera issue"
+                tvCameraStatus.text = "Camera issue"
                 tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
             } else {
-                val dual = if (result.hasDualCameras) "Dual ✅" else "Single ⚠️"
+                val dual = if (result.hasDualCameras) "Dual OK" else "Single only"
                 tvCameraStatus.text = "$dual | ${if (result.rearSupportsFullLevel) "FULL" else "LIMITED"}"
             }
         }
@@ -206,17 +200,13 @@ class MainActivity : AppCompatActivity() {
     private fun startDualPreview() {
         lifecycleScope.launch {
             try {
-                tvCameraStatus.text = "Starting cameras…"
+                tvCameraStatus.text = "Starting cameras..."
                 val (rear, front) = cameraManager.enumerateCameras()
-                cameraManager.startPreview(
-                    lifecycleOwner   = this@MainActivity,
-                    rearPreviewView  = previewRear,
-                    frontPreviewView = previewFront
-                )
-                tvCameraStatus.text = "📷 R:${rear?.logicalId ?: "N/A"}  F:${front?.logicalId ?: "N/A"}"
+                cameraManager.startPreview(this@MainActivity, previewRear, previewFront)
+                tvCameraStatus.text = "R:${rear?.logicalId ?: "N/A"}  F:${front?.logicalId ?: "N/A"}"
             } catch (e: Exception) {
                 Log.e(TAG, "Camera start failed: ${e.message}", e)
-                tvCameraStatus.text = "❌ ${e.message}"
+                tvCameraStatus.text = "Camera error: ${e.message}"
             }
         }
         lifecycleScope.launch {
@@ -225,7 +215,7 @@ class MainActivity : AppCompatActivity() {
                     is DVRCameraManager.CameraState.Previewing ->
                         tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_teal))
                     is DVRCameraManager.CameraState.Error -> {
-                        tvCameraStatus.text = "❌ ${state.message}"
+                        tvCameraStatus.text = "Camera error: ${state.message}"
                         tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
                     }
                     else -> {}
@@ -234,7 +224,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Service state observers ────────────────────────────────────────────
+    // ── Service observers ─────────────────────────────────────────────────
 
     private fun observeServiceState() {
         lifecycleScope.launch {
@@ -254,8 +244,7 @@ class MainActivity : AppCompatActivity() {
                         tvTimer.text = "00:00:00"
                     }
                     is RecordingService.ServiceState.Error ->
-                        Toast.makeText(this@MainActivity,
-                            "DVR Error: ${state.message}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this@MainActivity, "Error: ${state.message}", Toast.LENGTH_LONG).show()
                     else -> {}
                 }
             }
