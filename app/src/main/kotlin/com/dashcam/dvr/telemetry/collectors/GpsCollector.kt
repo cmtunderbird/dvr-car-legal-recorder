@@ -69,6 +69,13 @@ class GpsCollector(
     /** Swap to null to stop writing without stopping GNSS hardware. */
     @Volatile var writeCallback: ((GpsRecord) -> Unit)? = writeCallback
 
+    /**
+     * Secondary (non-writing) fan-out for ManeuverContext (Module 5).
+     * Receives every valid GPS record for dV/dt and heading-rate computation.
+     * Set by RecordingService when recording starts; cleared when recording stops.
+     */
+    @Volatile var analysisCallback: ((GpsRecord) -> Unit)? = null
+
     private val handlerThread = HandlerThread("GpsCollector").also { it.start() }
     private val handler        = Handler(handlerThread.looper)
 
@@ -196,28 +203,29 @@ class GpsCollector(
                 "SBAS=$inFixSbas QZSS=$inFixQzss")
         }
 
-        writeCallback?.invoke(
-            GpsRecord(
-                tsMonoNs   = SystemClock.elapsedRealtimeNanos(),
-                tsUtc      = ntpManager.correctedUtcNow(),
-                lat        = location.latitude,
-                lon        = location.longitude,
-                altM       = location.altitude,
-                speedKmh   = location.speed * 3.6f,
-                headingDeg = if (location.hasBearing()) location.bearing else -1f,
-                hdop       = hdop,
-                satellites = sats,
-                satsGps    = inFixGps,
-                satsGlo    = inFixGlo,
-                satsGal    = inFixGal,
-                satsBds    = inFixBds,
-                satsQzss   = inFixQzss,
-                satsSbas   = inFixSbas,
-                sbasActive = inFixSbas > 0,
-                agpsSeeded = agpsSeeded,
-                fixStatus  = fixSt
-            )
+        val record = GpsRecord(
+            tsMonoNs   = SystemClock.elapsedRealtimeNanos(),
+            tsUtc      = ntpManager.correctedUtcNow(),
+            lat        = location.latitude,
+            lon        = location.longitude,
+            altM       = location.altitude,
+            speedKmh   = location.speed * 3.6f,
+            headingDeg = if (location.hasBearing()) location.bearing else -1f,
+            hdop       = hdop,
+            satellites = sats,
+            satsGps    = inFixGps,
+            satsGlo    = inFixGlo,
+            satsGal    = inFixGal,
+            satsBds    = inFixBds,
+            satsQzss   = inFixQzss,
+            satsSbas   = inFixSbas,
+            sbasActive = inFixSbas > 0,
+            agpsSeeded = agpsSeeded,
+            fixStatus  = fixSt
         )
+        writeCallback?.invoke(record)      // telemetry.log writer
+        analysisCallback?.invoke(record)   // ManeuverContext (Module 5)
+
     }
 
     private fun estimateHdop(location: Location): Float {

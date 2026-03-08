@@ -21,6 +21,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import com.dashcam.dvr.collision.CollisionDetector
 import com.dashcam.dvr.collision.EventsLog
+import com.dashcam.dvr.collision.ManeuverContext
 import com.dashcam.dvr.collision.RoadQualityMonitor
 import com.dashcam.dvr.collision.model.ImpactEvent
 import com.dashcam.dvr.telemetry.model.CollisionRecord
@@ -96,6 +97,7 @@ class RecordingService : LifecycleService() {
         // ── Module 5: Collision + Road Quality ───────────────────────────────────
     private val _collisionEvents = MutableSharedFlow<ImpactEvent>(extraBufferCapacity = 8)
     val collisionEvents = _collisionEvents.asSharedFlow()
+    private lateinit var maneuverContext:   ManeuverContext
     private lateinit var roadMonitor:       RoadQualityMonitor
     private lateinit var collisionDetector: CollisionDetector
     private var eventsLog: EventsLog? = null
@@ -260,12 +262,16 @@ class RecordingService : LifecycleService() {
                         }
                     },
                     onAccelFanOut = { rec ->
-                    roadMonitor.onAccelSample(rec)
-                    collisionDetector.onAccelSample(rec)
-                },   // → CollisionDetector (Module 5)
+                        roadMonitor.onAccelSample(rec)
+                        collisionDetector.onAccelSample(rec)
+                    },
                     onGyroFanOut  = { rec ->
-                    collisionDetector.onGyroSample(rec)
-                }    // → CollisionDetector (Module 5)
+                        collisionDetector.onGyroSample(rec)
+                        maneuverContext.onGyroSample(rec)
+                    },
+                    onGpsFanOut   = { rec ->
+                        maneuverContext.onGpsRecord(rec)
+                    }   //  ManeuverContext GPS+gyro fusion (Module 5)
                 )
 
                 // ── Module 2 placeholder ─────────────────────────────────────────────────
@@ -289,6 +295,7 @@ class RecordingService : LifecycleService() {
             collisionDetector.writeCallback = null
             roadMonitor.reset()
             collisionDetector.reset()
+            maneuverContext.reset()
             eventsLog = null
             // Module 4: close session record on startup failure
                 currentSessionDir?.let { sessionManager.closeSession(it, "CRASH") }
@@ -320,6 +327,7 @@ class RecordingService : LifecycleService() {
             collisionDetector.writeCallback = null
             roadMonitor.reset()
             collisionDetector.reset()
+            maneuverContext.reset()
             eventsLog = null
             // ── Module 4: close session — write end_ts, final custody.log entry ───────
             currentSessionDir?.let { dir ->
@@ -388,11 +396,13 @@ class RecordingService : LifecycleService() {
     private fun startGpsMonitorLoop() {
         gpsMonitorJob?.cancel()
                 // Module 5: create detectors — they subscribe to accel/gyro fan-out
+        maneuverContext   = ManeuverContext()
         roadMonitor       = RoadQualityMonitor(telemetryEngine.ntpManager)
         collisionDetector = CollisionDetector(
-            ntpManager  = telemetryEngine.ntpManager,
-            roadMonitor = roadMonitor,
-            onEvent     = { event -> handleImpactEvent(event) }
+            ntpManager      = telemetryEngine.ntpManager,
+            roadMonitor     = roadMonitor,
+            maneuverContext = maneuverContext,
+            onEvent         = { event -> handleImpactEvent(event) }
         )
         gpsMonitorJob = lifecycleScope.launch {
             while (true) {

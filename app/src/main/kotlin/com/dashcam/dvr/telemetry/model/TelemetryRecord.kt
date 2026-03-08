@@ -155,15 +155,21 @@ data class RoadQualityRecord(
  */
 data class CollisionRecord(
     val type: String = "COLLISION",
-    @SerializedName("ts_mono_ns")  val tsMonoNs:   Long,
-    @SerializedName("ts_utc")      val tsUtc:      String,
-    val direction:                                  String,
-    @SerializedName("peak_g")      val peakG:      Float,
-    @SerializedName("duration_ms") val durationMs: Long,
-    @SerializedName("ax_g")        val axG:        Float,
-    @SerializedName("ay_g")        val ayG:        Float,
-    @SerializedName("az_net_g")    val azNetG:     Float,
-    @SerializedName("road_state")  val roadState:  String,
-    val confirmed:                                  Boolean,
-    val suppressed:                                 Boolean
+    @SerializedName("ts_mono_ns")    val tsMonoNs:    Long,
+    @SerializedName("ts_utc")        val tsUtc:       String,
+    val direction:                                     String,
+    @SerializedName("peak_g")        val peakG:       Float,
+    @SerializedName("duration_ms")   val durationMs:  Long,
+    @SerializedName("ax_g")          val axG:         Float,
+    @SerializedName("ay_g")          val ayG:         Float,
+    @SerializedName("az_net_g")      val azNetG:      Float,
+    // Maneuver subtraction forensic fields (Blueprint §8 - GPS+gyro fusion)
+    @SerializedName("expected_ax_g") val expectedAxG: Float = 0f,
+    @SerializedName("expected_ay_g") val expectedAyG: Float = 0f,
+    @SerializedName("residual_g")    val residualG:   Float = 0f,
+    @SerializedName("speed_kmh")     val speedKmh:    Float = 0f,
+    @SerializedName("fusion_valid")  val fusionValid: Boolean = false,
+    @SerializedName("road_state")    val roadState:   String,
+    val confirmed:                                     Boolean,
+    val suppressed:                                    Boolean
 )

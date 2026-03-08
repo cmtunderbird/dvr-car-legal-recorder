@@ -7,6 +7,7 @@ import com.dashcam.dvr.telemetry.collectors.GpsCollector
 import com.dashcam.dvr.telemetry.collectors.ImuCollector
 import com.dashcam.dvr.telemetry.collectors.MagnetometerCollector
 import com.dashcam.dvr.telemetry.model.AccelRecord
+import com.dashcam.dvr.telemetry.model.GpsRecord
 import com.dashcam.dvr.telemetry.model.GyroRecord
 import com.dashcam.dvr.telemetry.model.NtpRecord
 import com.dashcam.dvr.telemetry.ntp.NtpSyncManager
@@ -88,7 +89,8 @@ class TelemetryEngine(private val context: Context) {
         gpsCollector:  GpsCollector,
         onNtpSynced:   ((NtpRecord)   -> Unit)? = null,   // → SessionManager.patchNtpAndSensors()
         onAccelFanOut: ((AccelRecord) -> Unit)? = null,
-        onGyroFanOut:  ((GyroRecord)  -> Unit)? = null
+        onGyroFanOut:  ((GyroRecord)  -> Unit)? = null,
+        onGpsFanOut:   ((GpsRecord)   -> Unit)? = null
     ) {
         if (_running) { Log.w(TAG, "Already running — ignoring start()"); return }
         _running  = true
@@ -100,6 +102,8 @@ class TelemetryEngine(private val context: Context) {
 
         // Hook GPS write callback — GNSS hardware is already running
         activeGps.writeCallback = { writer.write(it) }
+        // Module 5: secondary GPS fan-out for ManeuverContext (does not write)
+        activeGps.analysisCallback = onGpsFanOut
 
         imu = ImuCollector(
             context       = context,
@@ -155,6 +159,7 @@ class TelemetryEngine(private val context: Context) {
         // Unhook GPS writer — GNSS hardware stays alive in RecordingService
         if (::activeGps.isInitialized) {
             activeGps.writeCallback = null
+            activeGps.analysisCallback = null
             Log.i(TAG, "GPS write callback cleared — GNSS hardware keeps running")
         }
 
