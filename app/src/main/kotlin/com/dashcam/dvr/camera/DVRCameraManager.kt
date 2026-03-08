@@ -30,19 +30,12 @@ import kotlin.coroutines.resumeWithException
 /**
  * DVRCameraManager — Dual concurrent camera pipeline (CameraX 1.4.x)
  *
- * XIAOMI / HyperOS ISSUE:
- * getAvailableConcurrentCameraInfos() returns EMPTY on many Xiaomi devices even
- * though the hardware physically supports simultaneous front+back streaming.
- * This is a known OEM HAL reporting bug (documented for Poco X3, Redmi series).
- *
- * FIX — Three-tier strategy:
- *   1. Try official concurrent pair from getAvailableConcurrentCameraInfos()
- *   2. If empty, FORCE concurrent bind with DEFAULT_BACK + DEFAULT_FRONT anyway
- *      (works on most Xiaomi despite empty concurrent list)
- *   3. If that throws, fall back to rear-only
- *
- * Both tiers use the list-overload bindToLifecycle(List<SingleCameraConfig>) which
- * opens two independent camera sessions atomically.
+ * STRATEGY: Directly attempt ConcurrentCamera bind with DEFAULT_BACK + DEFAULT_FRONT.
+ * We deliberately skip getAvailableConcurrentCameraInfos() because:
+ *   (a) It's @RequiresOptIn and causes compiler errors even with @SuppressLint
+ *   (b) Xiaomi/HyperOS devices return empty list even when hardware supports dual-cam
+ * The bindToLifecycle(List<SingleCameraConfig>) call is the ground truth —
+ * if hardware supports it, it works; if not, the catch block falls back to rear-only.
  */
 @SuppressLint("UnsafeOptInUsageError")
 class DVRCameraManager(private val context: Context) {
@@ -69,7 +62,9 @@ class DVRCameraManager(private val context: Context) {
         val maxVideoSize : Size?
     ) {
         override fun toString() =
-            "CameraInfo(id=$logicalId, facing=${facingName(facing)}, level=${supportLevelName(supportLevel)}, maxVideo=$maxVideoSize)"
+            "CameraInfo(id=$logicalId, facing=${facingName(facing)}, " +
+            "level=${supportLevelName(supportLevel)}, maxVideo=$maxVideoSize)"
+
         private fun facingName(f: Int) = when (f) {
             CameraCharacteristics.LENS_FACING_BACK  -> "BACK"
             CameraCharacteristics.LENS_FACING_FRONT -> "FRONT"
@@ -135,37 +130,7 @@ class DVRCameraManager(private val context: Context) {
             sharedProvider = provider
             provider.unbindAll()
 
-            // ── Step 1: Try official concurrent pair from HAL ─────────────────
-            val concurrentInfos = provider.getAvailableConcurrentCameraInfos()
-            Log.i(TAG, "Concurrent pairs reported by HAL: ${concurrentInfos.size}")
-
-            var backSelector:  CameraSelector? = null
-            var frontSelector: CameraSelector? = null
-
-            outer@ for (pair in concurrentInfos) {
-                var b: CameraSelector? = null
-                var f: CameraSelector? = null
-                for (info in pair) {
-                    when (info.lensFacing) {
-                        CameraSelector.LENS_FACING_BACK  -> b = info.cameraSelector
-                        CameraSelector.LENS_FACING_FRONT -> f = info.cameraSelector
-                    }
-                }
-                if (b != null && f != null) { backSelector = b; frontSelector = f; break@outer }
-            }
-
-            if (backSelector == null || frontSelector == null) {
-                // ── Step 2: Xiaomi HAL fix — force DEFAULT selectors ───────────
-                // Xiaomi devices return empty concurrent list but CAN physically run
-                // both cameras.  bindToLifecycle(List<SingleCameraConfig>) often works
-                // anyway.  We set the flags and attempt; catch covers failure.
-                Log.w(TAG, "HAL reported no concurrent pairs (common Xiaomi bug) — forcing DEFAULT selectors")
-                backSelector  = CameraSelector.DEFAULT_BACK_CAMERA
-                frontSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-            }
-
-            bindDualCameras(provider, lifecycleOwner, backSelector, frontSelector,
-                            rearPreviewView, frontPreviewView)
+            bindDualCameras(provider, lifecycleOwner, rearPreviewView, frontPreviewView)
 
         } catch (e: Exception) {
             Log.e(TAG, "startPreview failed: ${e.message}", e)
@@ -178,12 +143,12 @@ class DVRCameraManager(private val context: Context) {
     private fun bindDualCameras(
         provider       : ProcessCameraProvider,
         lifecycleOwner : LifecycleOwner,
-        backSelector   : CameraSelector,
-        frontSelector  : CameraSelector,
         rearView       : PreviewView,
         frontView      : PreviewView
     ) {
-        // Concurrent mode max resolution is 720p per stream
+        // Concurrent mode: CameraX caps each stream at 720p.
+        // We use DEFAULT_BACK and DEFAULT_FRONT — no getAvailableConcurrentCameraInfos()
+        // needed. That API is @RequiresOptIn and Xiaomi returns empty anyway.
         val rearPreview = Preview.Builder()
             .setResolutionSelector(resolutionSelector(1280, 720))
             .build().also { it.setSurfaceProvider(rearView.surfaceProvider) }
@@ -195,29 +160,31 @@ class DVRCameraManager(private val context: Context) {
 
         try {
             val primary = ConcurrentCamera.SingleCameraConfig(
-                backSelector,
+                CameraSelector.DEFAULT_BACK_CAMERA,
                 UseCaseGroup.Builder().addUseCase(rearPreview).build(),
                 lifecycleOwner
             )
             val secondary = ConcurrentCamera.SingleCameraConfig(
-                frontSelector,
+                CameraSelector.DEFAULT_FRONT_CAMERA,
                 UseCaseGroup.Builder().addUseCase(frontPreview).build(),
                 lifecycleOwner
             )
+            // bindToLifecycle(List<SingleCameraConfig>) opens both sessions atomically
             provider.bindToLifecycle(listOf(primary, secondary))
             Log.i(TAG, "Dual concurrent bind SUCCESS")
             _state.value = CameraState.Previewing
 
         } catch (e: Exception) {
-            // ── Step 3: Hardware truly cannot run both at once ─────────────────
-            Log.e(TAG, "Dual bind failed (${e.message}) — rear-only fallback")
+            // Hardware truly cannot run both simultaneously — rear-only fallback
+            Log.e(TAG, "Dual bind failed (${e.message}) — falling back to rear-only")
             provider.unbindAll()
             val rearOnly = Preview.Builder()
                 .setResolutionSelector(resolutionSelector(
                     AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
                 .build().also { it.setSurfaceProvider(rearView.surfaceProvider) }
-            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, rearOnly)
-            Log.w(TAG, "REAR-only mode active — front camera not available on this device")
+            provider.bindToLifecycle(lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA, rearOnly)
+            Log.w(TAG, "REAR-only mode active")
             _state.value = CameraState.Previewing
         }
     }
