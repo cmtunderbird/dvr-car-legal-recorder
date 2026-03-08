@@ -128,11 +128,15 @@ class DVRCameraManager(private val context: Context) {
             provider.unbindAll()          // ← ONE clear, before anything is bound
 
             val rearPreview = Preview.Builder()
-                .setTargetResolution(Size(AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
+                .setTargetResolution(android.util.Size(AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
                 .build().also { it.setSurfaceProvider(rearPreviewView.surfaceProvider) }
 
             val frontPreview = Preview.Builder()
-                .setTargetResolution(Size(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT))
+                .setResolutionSelector(androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                    .setResolutionStrategy(androidx.camera.core.resolutionselector.ResolutionStrategy(
+                        Size(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT),
+                        androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+                    .build())
                 .build().also { it.setSurfaceProvider(frontPreviewView.surfaceProvider) }
 
             // Bind rear — no unbindAll after this
@@ -180,3 +184,4 @@ class DVRCameraManager(private val context: Context) {
             }
         }
 }
+
