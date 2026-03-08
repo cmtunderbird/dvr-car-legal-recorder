@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DVR" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/dvr_blue</item>
+        <item name="colorPrimaryVariant">@color/dvr_blue_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/dvr_teal</item>
+        <item name="android:windowBackground">@color/dvr_bg</item>
+        <item name="android:statusBarColor">@color/dvr_blue_dark</item>
+        <item name="android:navigationBarColor">@color/dvr_bg</item>
+    </style>
+</resources>

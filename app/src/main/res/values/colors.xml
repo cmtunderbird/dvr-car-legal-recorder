@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="dvr_blue">#1B3A5C</color>
+    <color name="dvr_blue_dark">#0D1B2A</color>
+    <color name="dvr_teal">#17A589</color>
+    <color name="dvr_red">#C0392B</color>
+    <color name="dvr_amber">#D4AC0D</color>
+    <color name="dvr_bg">#0D1B2A</color>
+    <color name="white">#FFFFFF</color>
+    <color name="text_secondary">#AEB6BF</color>
+</resources>

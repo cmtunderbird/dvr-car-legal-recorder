@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DVR Evidence</string>
+    <string name="start_recording">Start Recording</string>
+    <string name="stop_recording">Stop Recording</string>
+    <string name="save_event">Save Event</string>
+    <string name="gps_acquiring">GPS Acquiring…</string>
+    <string name="recording_active">● REC</string>
+    <string name="channel_recording_name">Recording Status</string>
+    <string name="channel_alert_name">DVR Alerts</string>
+</resources>

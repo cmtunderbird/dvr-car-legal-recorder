@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Evidence session exports shared via FileProvider -->
+    <files-path name="evidence_exports" path="exports/" />
+    <external-files-path name="sessions" path="sessions/" />
+</paths>

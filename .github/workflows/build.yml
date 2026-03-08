@@ -1,0 +1,163 @@
+name: DVR Android CI
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:          # manual trigger from GitHub UI
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Permissions
+# ─────────────────────────────────────────────────────────────────────────────
+permissions:
+  contents: write             # needed to create GitHub Releases
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  JAVA_VERSION: '17'
+  ANDROID_API:  '34'
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 1 — Build & Test
+  # ═══════════════════════════════════════════════════════════════════════════
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── Java 17 ──────────────────────────────────────────────────────────
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      # ── Android SDK ───────────────────────────────────────────────────────
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ── Gradle cache ──────────────────────────────────────────────────────
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # ── Gradle wrapper executable ─────────────────────────────────────────
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      # ── Unit tests ────────────────────────────────────────────────────────
+      - name: Run unit tests
+        run: ./gradlew test --no-daemon
+
+      # ── Lint ──────────────────────────────────────────────────────────────
+      - name: Run Android lint
+        run: ./gradlew lint --no-daemon
+        continue-on-error: true   # lint warnings don't block the build
+
+      # ── Debug APK ─────────────────────────────────────────────────────────
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      # ── Release APK (signed) ──────────────────────────────────────────────
+      # Requires the following GitHub repository secrets:
+      #   KEYSTORE_BASE64    — base64-encoded .jks keystore file
+      #   KEYSTORE_PASSWORD  — keystore password
+      #   KEY_ALIAS          — signing key alias
+      #   KEY_PASSWORD       — key password
+      - name: Decode keystore
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > app/dvr-release.jks
+
+      - name: Build Release APK
+        if: github.ref == 'refs/heads/main'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=dvr-release.jks \
+            -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
+            -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
+            -Pandroid.injected.signing.key.password=$KEY_PASSWORD \
+            --no-daemon
+
+      # ── Upload artefacts ──────────────────────────────────────────────────
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dvr-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Upload Release APK
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dvr-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 90
+
+      # ── Lint report ───────────────────────────────────────────────────────
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: app/build/reports/lint-results-*.html
+          retention-days: 7
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 2 — Create GitHub Release (main branch tags only)
+  # ═══════════════════════════════════════════════════════════════════════════
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download Release APK
+        uses: actions/download-artifact@v4
+        with:
+          name: dvr-release-apk
+          path: release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.apk
+          generate_release_notes: true
+          body: |
+            ## Dual Camera Evidence DVR — ${{ github.ref_name }}
+
+            ### Installation
+            1. Enable "Install from unknown sources" on the target Android device
+            2. Copy the APK to the device
+            3. Tap to install
+            4. Grant all requested permissions
+            5. Follow the Setup Wizard for calibration
+
+            ### What's included
+            See CHANGELOG.md for full details.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

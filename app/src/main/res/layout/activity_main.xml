@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/dvr_bg">
+
+    <!-- ── Rear camera preview (left 72%) ───────────────────────────── -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewRear"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/rightPanel"
+        app:layout_constraintWidth_percent="0.72"
+        app:scaleType="fillCenter" />
+
+    <!-- Road-facing label overlay -->
+    <TextView
+        android:id="@+id/labelRear"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="● ROAD"
+        android:textColor="@color/white"
+        android:textSize="9sp"
+        android:fontFamily="monospace"
+        android:background="#80000000"
+        android:paddingHorizontal="6dp"
+        android:paddingVertical="2dp"
+        app:layout_constraintTop_toTopOf="@id/previewRear"
+        app:layout_constraintStart_toStartOf="@id/previewRear"
+        android:layout_marginStart="6dp"
+        android:layout_marginTop="6dp" />
+
+    <!-- ── Right panel ───────────────────────────────────────────────── -->
+    <LinearLayout
+        android:id="@+id/rightPanel"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:orientation="vertical"
+        android:background="@color/dvr_blue_dark"
+        android:padding="8dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintWidth_percent="0.28">
+
+        <!-- Cabin label -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="● CABIN"
+            android:textColor="@color/text_secondary"
+            android:textSize="8sp"
+            android:fontFamily="monospace"
+            android:paddingBottom="2dp" />
+
+        <!-- Front / cabin camera preview -->
+        <androidx.camera.view.PreviewView
+            android:id="@+id/previewFront"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            app:scaleType="fillCenter" />
+
+        <!-- Camera status (IDs / validation result) -->
+        <TextView
+            android:id="@+id/tvCameraStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Initialising cameras…"
+            android:textColor="@color/text_secondary"
+            android:textSize="8sp"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:paddingVertical="3dp" />
+
+        <!-- Session timer -->
+        <TextView
+            android:id="@+id/tvTimer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="00:00:00"
+            android:textColor="@color/white"
+            android:textSize="18sp"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:paddingVertical="4dp" />
+
+        <!-- GPS status -->
+        <TextView
+            android:id="@+id/tvGpsStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⊙ GPS Acquiring…"
+            android:textColor="@color/dvr_amber"
+            android:textSize="9sp"
+            android:gravity="center"
+            android:paddingBottom="6dp" />
+
+        <!-- Record / Stop button -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRecord"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="@string/start_recording"
+            android:textSize="12sp"
+            app:backgroundTint="@color/dvr_teal"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Manual event trigger -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnEvent"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:text="@string/save_event"
+            android:textSize="11sp"
+            app:backgroundTint="@color/dvr_red"
+            android:enabled="false" />
+
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
