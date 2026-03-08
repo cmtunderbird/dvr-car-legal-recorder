@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification icon for the DVR recording foreground service.
+     Must be a white/transparent monochrome drawable to render correctly
+     in the Android status bar. Reuses ic_rec which already meets this requirement. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_rec" />
+</layer-list>
