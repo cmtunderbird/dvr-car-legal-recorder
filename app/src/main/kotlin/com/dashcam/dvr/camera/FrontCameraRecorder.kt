@@ -22,18 +22,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
-/**
- * FrontCameraRecorder — Camera2 + MediaRecorder
- *
- * Operates completely independently of CameraX. This lets the front camera
- * open and record while CameraX holds the rear camera with VideoCapture.
- *
- * Lifecycle:
- *   1. open(textureView)       — starts preview (call once texture is available)
- *   2. startRecording(file)    — begins MediaRecorder to front_camera.mp4
- *   3. stopRecording()         — finalises the file
- *   4. close()                 — releases camera + thread (call in onDestroy)
- */
 @SuppressLint("MissingPermission")
 class FrontCameraRecorder(private val context: Context) {
 
@@ -45,36 +33,29 @@ class FrontCameraRecorder(private val context: Context) {
     val state: StateFlow<State> = _state
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    private var cameraId:      String?              = null
-    private var cameraDevice:  CameraDevice?        = null
-    private var captureSession:CameraCaptureSession? = null
-    private var mediaRecorder: MediaRecorder?       = null
-    private var previewSurface:Surface?             = null
-    private var recorderSurface:Surface?            = null
-    private var currentFile:   File?                = null
+    private var cameraId:       String?               = null
+    private var cameraDevice:   CameraDevice?         = null
+    private var captureSession: CameraCaptureSession? = null
+    private var mediaRecorder:  MediaRecorder?        = null
+    private var previewSurface: Surface?              = null
+    private var recorderSurface:Surface?              = null
+    private var currentFile:    File?                 = null
 
-    private var backgroundThread: HandlerThread? = null
-    private var backgroundHandler: Handler?      = null
+    private var backgroundThread:  HandlerThread? = null
+    private var backgroundHandler: Handler?       = null
 
     private val previewSize = Size(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT)
 
-    // ── Open ──────────────────────────────────────────────────────────────
-
     fun open(textureView: TextureView) {
         cameraId = findFrontCameraId() ?: run {
-            Log.e(TAG, "No front camera found")
-            _state.value = State.ERROR
-            return
+            Log.e(TAG, "No front camera found"); _state.value = State.ERROR; return
         }
         startBackgroundThread()
-
         if (textureView.isAvailable) {
             openCamera(textureView.surfaceTexture!!)
         } else {
             textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                    openCamera(st)
-                }
+                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) = openCamera(st)
                 override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
                 override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
                 override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
@@ -85,7 +66,6 @@ class FrontCameraRecorder(private val context: Context) {
     private fun openCamera(surfaceTexture: SurfaceTexture) {
         surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
         previewSurface = Surface(surfaceTexture)
-
         try {
             cameraManager.openCamera(cameraId!!, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
@@ -104,13 +84,9 @@ class FrontCameraRecorder(private val context: Context) {
                 }
             }, backgroundHandler)
         } catch (e: CameraAccessException) {
-            Log.e(TAG, "openCamera failed: ${e.message}", e)
-            _state.value = State.ERROR
+            Log.e(TAG, "openCamera failed: ${e.message}", e); _state.value = State.ERROR
         }
     }
-
-
-    // ── Preview session ───────────────────────────────────────────────────
 
     private fun startPreviewSession() {
         val device = cameraDevice ?: return
@@ -138,36 +114,24 @@ class FrontCameraRecorder(private val context: Context) {
         }
     }
 
-    // ── Recording ─────────────────────────────────────────────────────────
-
     fun startRecording(outputFile: File): Boolean {
-        val device = cameraDevice ?: run {
-            Log.e(TAG, "startRecording: camera not open"); return false
-        }
-        val prevSurface = previewSurface ?: run {
-            Log.e(TAG, "startRecording: no preview surface"); return false
-        }
+        val device = cameraDevice ?: run { Log.e(TAG, "startRecording: camera not open"); return false }
+        val prevSurface = previewSurface ?: run { Log.e(TAG, "startRecording: no preview surface"); return false }
         currentFile = outputFile
-
-        // Stop preview session before reconfiguring with recorder surface
         captureSession?.close(); captureSession = null
-
         val recorder = buildMediaRecorder(outputFile) ?: return false
         mediaRecorder = recorder
         recorderSurface = recorder.surface
-
         try {
             @Suppress("DEPRECATION")
-            device.createCaptureSession(
-                listOf(prevSurface, recorderSurface!!),
+            device.createCaptureSession(listOf(prevSurface, recorderSurface!!),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
                         val req = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(prevSurface)
                             addTarget(recorderSurface!!)
-                            set(CaptureRequest.CONTROL_AF_MODE,
-                                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                         }.build()
                         session.setRepeatingRequest(req, null, backgroundHandler)
                         recorder.start()
@@ -181,9 +145,8 @@ class FrontCameraRecorder(private val context: Context) {
                 }, backgroundHandler)
             return true
         } catch (e: Exception) {
-            Log.e(TAG, "startRecording session failed: ${e.message}", e)
-            mediaRecorder?.release(); mediaRecorder = null
-            recorderSurface = null
+            Log.e(TAG, "startRecording failed: ${e.message}", e)
+            mediaRecorder?.release(); mediaRecorder = null; recorderSurface = null
             return false
         }
     }
@@ -202,12 +165,8 @@ class FrontCameraRecorder(private val context: Context) {
             recorderSurface?.release(); recorderSurface = null
             currentFile = null
         }
-        // Restart preview session so the display stays live
         startPreviewSession()
     }
-
-
-    // ── Close ─────────────────────────────────────────────────────────────
 
     fun close() {
         try {
@@ -216,15 +175,11 @@ class FrontCameraRecorder(private val context: Context) {
             previewSurface?.release(); previewSurface = null
             mediaRecorder?.release(); mediaRecorder  = null
             recorderSurface?.release(); recorderSurface = null
-        } catch (e: Exception) {
-            Log.w(TAG, "close: ${e.message}")
-        }
+        } catch (e: Exception) { Log.w(TAG, "close: ${e.message}") }
         stopBackgroundThread()
         _state.value = State.CLOSED
         Log.i(TAG, "Front camera closed")
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────
 
     private fun buildMediaRecorder(outputFile: File): MediaRecorder? {
         return try {
@@ -239,21 +194,18 @@ class FrontCameraRecorder(private val context: Context) {
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 setVideoSize(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT)
                 setVideoFrameRate(30)
-                setVideoEncodingBitRate(AppConstants.FRONT_CAM_BITRATE)
-                setOrientationHint(270)   // front camera landscape correction
+                setVideoEncodingBitRate(AppConstants.FRONT_CAM_BITRATE_BPS)  // fixed: was FRONT_CAM_BITRATE
+                setOrientationHint(270)
                 prepare()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "buildMediaRecorder failed: ${e.message}", e)
-            null
+            Log.e(TAG, "buildMediaRecorder failed: ${e.message}", e); null
         }
     }
 
     private fun findFrontCameraId(): String? {
         for (id in cameraManager.cameraIdList) {
-            val facing = cameraManager
-                .getCameraCharacteristics(id)
-                .get(CameraCharacteristics.LENS_FACING)
+            val facing = cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING)
             if (facing == CameraCharacteristics.LENS_FACING_FRONT) return id
         }
         return null
@@ -267,7 +219,6 @@ class FrontCameraRecorder(private val context: Context) {
     private fun stopBackgroundThread() {
         backgroundThread?.quitSafely()
         try { backgroundThread?.join() } catch (_: InterruptedException) {}
-        backgroundThread = null
-        backgroundHandler = null
+        backgroundThread = null; backgroundHandler = null
     }
 }
