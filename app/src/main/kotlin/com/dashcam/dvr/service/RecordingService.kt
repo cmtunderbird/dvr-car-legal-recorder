@@ -1,25 +1,46 @@
 package com.dashcam.dvr.service
 
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.dashcam.dvr.DVRApplication.Companion.CHANNEL_RECORDING
 import com.dashcam.dvr.R
+import com.dashcam.dvr.telemetry.TelemetryEngine
 import com.dashcam.dvr.ui.MainActivity
+import com.dashcam.dvr.util.AppConstants
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
+/**
+ * RecordingService — Foreground Service
+ *
+ * Blueprint §14: Process Survival
+ * ────────────────────────────────
+ * Module 1:  Foreground Service skeleton — WakeLock, notifications, lifecycle
+ * Module 3:  TelemetryEngine wired in — GPS + IMU + NTP started/stopped in sync
+ * Module 4:  SessionManager will replace the temporary createSessionDirStub()
+ * Module 5:  CollisionDetector fan-out hooks pre-plumbed in TelemetryEngine.start()
+ *
+ * Startup sequence:
+ *   acquireWakeLock → createSessionDir → telemetryEngine.start() → cameraManager.start() (M2)
+ *
+ * Shutdown sequence:
+ *   cameraManager.stop() (M2) → telemetryEngine.stop() → evidencePackager.seal() (M6) → releaseWakeLock
+ */
 class RecordingService : LifecycleService() {
 
     inner class RecordingBinder : Binder() {
@@ -27,6 +48,7 @@ class RecordingService : LifecycleService() {
     }
     private val binder = RecordingBinder()
 
+    // ── State ──────────────────────────────────────────────────────────────────
     sealed class ServiceState {
         object Idle      : ServiceState()
         object Starting  : ServiceState()
@@ -38,28 +60,46 @@ class RecordingService : LifecycleService() {
     private val _state = MutableStateFlow<ServiceState>(ServiceState.Idle)
     val state: StateFlow<ServiceState> = _state
 
-    private val _elapsedSeconds = MutableStateFlow(0L)
-    val elapsedSeconds: StateFlow<Long> = _elapsedSeconds
+    // ── Module 3 ───────────────────────────────────────────────────────────────
+    private lateinit var telemetryEngine: TelemetryEngine
 
+    // ── WakeLock ───────────────────────────────────────────────────────────────
     private var wakeLock: PowerManager.WakeLock? = null
-    private var timerJob: Job? = null
-    private val NOTIFICATION_ID = 1001
+
+    // ── Session directory (stub until Module 4) ────────────────────────────────
+    private var currentSessionDir: File? = null
+
+    private var statusUpdateJob: Job? = null
 
     companion object {
+        private const val TAG = "RecordingService"
+
         const val ACTION_START_RECORDING = "com.dashcam.dvr.START_RECORDING"
         const val ACTION_STOP_RECORDING  = "com.dashcam.dvr.STOP_RECORDING"
         const val ACTION_TRIGGER_EVENT   = "com.dashcam.dvr.TRIGGER_EVENT"
-        private const val TAG            = "RecordingService"
+
+        private const val NOTIFICATION_ID  = 1001
+        private const val STATUS_UPDATE_MS = 2_000L
+
+        fun startRecording(context: Context) =
+            context.startForegroundService(
+                Intent(context, RecordingService::class.java)
+                    .setAction(ACTION_START_RECORDING)
+            )
+
+        fun stopRecording(context: Context) =
+            context.startService(
+                Intent(context, RecordingService::class.java)
+                    .setAction(ACTION_STOP_RECORDING)
+            )
     }
+
+    // ── Lifecycle ──────────────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
-        startService(Intent(applicationContext, RecordingService::class.java))
-        ServiceCompat.startForeground(
-            this, NOTIFICATION_ID, buildNotification("DVR Ready"),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-        )
-        Log.i(TAG, "Service created")
+        telemetryEngine = TelemetryEngine(applicationContext)
+        Log.i(TAG, "RecordingService created")
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -70,126 +110,174 @@ class RecordingService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_START_RECORDING -> startRecording()
-            ACTION_STOP_RECORDING  -> stopRecording()
-            ACTION_TRIGGER_EVENT   -> triggerEvent()
+            ACTION_START_RECORDING -> handleStartRecording()
+            ACTION_STOP_RECORDING  -> handleStopRecording()
+            ACTION_TRIGGER_EVENT   -> handleManualEvent()
         }
-        return START_NOT_STICKY
-    }
-
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        Log.i(TAG, "onTaskRemoved — resetting to Idle")
-        timerJob?.cancel(); timerJob = null
-        releaseWakeLock()
-        _state.value = ServiceState.Idle
-        _elapsedSeconds.value = 0L
-        updateNotification("DVR Ready")
-        super.onTaskRemoved(rootIntent)
+        return START_STICKY
     }
 
     override fun onDestroy() {
-        releaseWakeLock()
-        timerJob?.cancel()
         super.onDestroy()
-        Log.i(TAG, "Service destroyed")
-    }
-
-    // ── Public API ────────────────────────────────────────────────────────
-
-    /**
-     * Force-reset to Idle.
-     * Called by MainActivity.onServiceConnected() when it finds the service
-     * already in Recording state with no camera session — this happens on HyperOS
-     * because the service process survives after the app is killed/restarted,
-     * retaining the old Recording state but with no live camera attached.
-     */
-    fun resetToIdle() {
-        Log.w(TAG, "resetToIdle() — clearing orphaned state (was: ${_state.value})")
-        timerJob?.cancel(); timerJob = null
+        if (telemetryEngine.isRunning) {
+            Log.w(TAG, "Service destroyed while recording — emergency telemetry stop")
+            telemetryEngine.stop()
+        }
         releaseWakeLock()
-        _state.value = ServiceState.Idle
-        _elapsedSeconds.value = 0L
-        updateNotification("DVR Ready")
+        Log.i(TAG, "RecordingService destroyed")
     }
 
-    fun startRecording() {
-        if (_state.value is ServiceState.Recording || _state.value is ServiceState.Starting) return
-        Log.i(TAG, "startRecording()")
+    // ── Recording control ──────────────────────────────────────────────────────
+
+    private fun handleStartRecording() {
+        if (_state.value is ServiceState.Recording) {
+            Log.w(TAG, "Already recording — ignoring start command"); return
+        }
         _state.value = ServiceState.Starting
+        startForegroundNotification()
         acquireWakeLock()
-        updateNotification("REC | Starting...")
+
         lifecycleScope.launch {
-            _elapsedSeconds.value = 0L
-            _state.value = ServiceState.Recording
-            updateNotification("REC | 00:00:00")
-            startTimer()
-        }
-    }
+            try {
+                val sessionDir = createSessionDirStub()
+                currentSessionDir = sessionDir
 
-    fun stopRecording() {
-        if (_state.value !is ServiceState.Recording) return
-        Log.i(TAG, "stopRecording()")
-        _state.value = ServiceState.Stopping
-        lifecycleScope.launch {
-            timerJob?.cancel(); timerJob = null
-            _elapsedSeconds.value = 0L
-            releaseWakeLock()
-            _state.value = ServiceState.Idle
-            updateNotification("DVR Ready")
-        }
-    }
+                // ── Module 3: Start TelemetryEngine ───────────────────────────
+                // Fan-out lambdas are null until CollisionDetector (Module 5) is added.
+                telemetryEngine.start(
+                    sessionDir    = sessionDir,
+                    onAccelFanOut = null,   // → collisionDetector.onAccel() (Module 5)
+                    onGyroFanOut  = null    // → collisionDetector.onGyro()  (Module 5)
+                )
 
-    fun triggerEvent() {
-        if (_state.value !is ServiceState.Recording) return
-        lifecycleScope.launch { updateNotification("REC | Event saved!") }
-    }
+                // ── Module 2 placeholder ──────────────────────────────────────
+                // cameraManager.start(sessionDir)
 
-    // ── Private helpers ───────────────────────────────────────────────────
+                _state.value = ServiceState.Recording
+                startStatusUpdateLoop()
+                Log.i(TAG, "Recording started — session: ${sessionDir.name}")
 
-    private fun startTimer() {
-        timerJob = lifecycleScope.launch {
-            while (true) {
-                delay(1_000)
-                _elapsedSeconds.value += 1
-                val s = _elapsedSeconds.value
-                updateNotification("REC | %02d:%02d:%02d"
-                    .format(s / 3600, (s % 3600) / 60, s % 60))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start recording: ${e.message}")
+                _state.value = ServiceState.Error(e.message ?: "Unknown error")
+                telemetryEngine.stop()
+                releaseWakeLock()
+                stopSelf()
             }
         }
     }
 
+    private fun handleStopRecording() {
+        if (_state.value !is ServiceState.Recording) {
+            Log.w(TAG, "Not recording — ignoring stop command"); return
+        }
+        _state.value = ServiceState.Stopping
+        statusUpdateJob?.cancel()
+
+        lifecycleScope.launch {
+            // ── Module 2 placeholder ──────────────────────────────────────────
+            // cameraManager.stop()
+
+            // ── Module 3: Stop TelemetryEngine ────────────────────────────────
+            // Flushes and closes telemetry.log before Module 6 seals the session.
+            telemetryEngine.stop()
+
+            // ── Module 6 placeholder ──────────────────────────────────────────
+            // evidencePackager.seal(currentSessionDir)
+
+            // Log NTP status for SessionManager to pick up in Module 4
+            if (telemetryEngine.ntpSyncStatus != "SYNCED")
+                Log.w(TAG, "Session CLOCK_UNVERIFIED — ${telemetryEngine.ntpSyncStatus}")
+
+            Log.i(TAG, "Session ended — " +
+                "first_fix=${telemetryEngine.firstValidFixTs ?: "NONE"}  " +
+                "ntp=${telemetryEngine.ntpSyncStatus}  " +
+                "offset=${telemetryEngine.ntpOffsetMs}ms"
+            )
+
+            releaseWakeLock()
+            _state.value = ServiceState.Idle
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    private fun handleManualEvent() {
+        Log.i(TAG, "Manual event triggered — segment protection queued (Module 7)")
+    }
+
+    // ── Session directory stub (replaced by SessionManager in Module 4) ─────────
+
+    private fun createSessionDirStub(): File {
+        val timestamp  = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val baseDir    = getExternalFilesDir("sessions") ?: filesDir.resolve("sessions")
+        val sessionDir = File(baseDir, "session_$timestamp")
+        sessionDir.mkdirs()
+        Log.i(TAG, "Session dir created (stub): ${sessionDir.absolutePath}")
+        return sessionDir
+    }
+
+    // ── WakeLock ───────────────────────────────────────────────────────────────
+
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DVR:RecordingWakeLock")
-            .also { it.setReferenceCounted(false); it.acquire(12 * 60 * 60 * 1000L) }
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DVR:RecordingWakeLock")
+            .also { it.acquire(AppConstants.MAX_SESSION_WAKELOCK_MS) }
+        Log.d(TAG, "WakeLock acquired")
     }
 
     private fun releaseWakeLock() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
+        Log.d(TAG, "WakeLock released")
     }
 
-    private fun buildNotification(text: String) =
-        NotificationCompat.Builder(this, CHANNEL_RECORDING)
-            .setContentTitle("DVR Evidence")
-            .setContentText(text)
-            .setSmallIcon(R.drawable.ic_rec)
-            .setOngoing(true).setOnlyAlertOnce(true).setSilent(true)
-            .setContentIntent(PendingIntent.getActivity(
-                this, 0, Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .addAction(R.drawable.ic_stop, "Stop", PendingIntent.getService(
-                this, 1,
-                Intent(this, RecordingService::class.java).setAction(ACTION_STOP_RECORDING),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .addAction(R.drawable.ic_event, "Event", PendingIntent.getService(
-                this, 2,
-                Intent(this, RecordingService::class.java).setAction(ACTION_TRIGGER_EVENT),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .build()
+    // ── Notification ───────────────────────────────────────────────────────────
+
+    private fun startForegroundNotification() =
+        startForeground(NOTIFICATION_ID, buildNotification("Starting recording…"))
 
     private fun updateNotification(text: String) =
-        (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
             .notify(NOTIFICATION_ID, buildNotification(text))
+
+    private fun buildNotification(contentText: String) =
+        NotificationCompat.Builder(this, CHANNEL_RECORDING)
+            .setSmallIcon(R.drawable.ic_dashcam_notification)
+            .setContentTitle("DVR Recording")
+            .setContentText(contentText)
+            .setOngoing(true)
+            .setSilent(true)
+            .setContentIntent(openMainActivityIntent())
+            .addAction(0, "Stop",  stopPendingIntent())
+            .addAction(0, "Event", triggerEventPendingIntent())
+            .build()
+
+    private fun startStatusUpdateLoop() {
+        statusUpdateJob = lifecycleScope.launch {
+            while (true) {
+                delay(STATUS_UPDATE_MS)
+                val gps = if (telemetryEngine.hasValidGpsFix) "GPS ✓" else "GPS acquiring…"
+                val ntp = if (telemetryEngine.ntpSyncStatus == "SYNCED") "NTP ✓" else "NTP ✗"
+                updateNotification("Recording  $gps  $ntp")
+            }
+        }
+    }
+
+    // ── PendingIntents ─────────────────────────────────────────────────────────
+
+    private fun openMainActivityIntent() = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    private fun stopPendingIntent() = PendingIntent.getService(
+        this, 1, Intent(this, RecordingService::class.java).setAction(ACTION_STOP_RECORDING),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    private fun triggerEventPendingIntent() = PendingIntent.getService(
+        this, 2, Intent(this, RecordingService::class.java).setAction(ACTION_TRIGGER_EVENT),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
 }
