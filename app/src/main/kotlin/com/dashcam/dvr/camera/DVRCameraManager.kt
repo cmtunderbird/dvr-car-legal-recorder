@@ -8,8 +8,12 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import android.util.Size
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -24,14 +28,18 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * DVRCameraManager — Dual Camera Pipeline
+ * DVRCameraManager — Dual Camera Pipeline (CameraX 1.3.x)
  *
- * CameraX 1.3.x dual-camera strategy:
- * - Call unbindAll() ONCE before any binding
- * - Bind rear then front WITHOUT unbindAll() between them
- * - CameraX accumulates use cases per lifecycle — the second bind does NOT
- *   replace the first as long as we don't call unbindAll() in between
+ * FRONT CAMERA FIX:
+ * Using DEFAULT_FRONT_CAMERA / DEFAULT_BACK_CAMERA replaces the active camera
+ * session on each bindToLifecycle call — so rear always won, front was always black.
+ *
+ * Fix: Build an explicit CameraSelector per logical camera ID using Camera2CameraInfo.
+ * CameraX then opens each camera as a distinct session, both run concurrently.
+ *
+ * Both Preview instances use ResolutionSelector (deprecated setTargetResolution removed).
  */
+@OptIn(ExperimentalCamera2Interop::class)
 class DVRCameraManager(private val context: Context) {
 
     companion object { private const val TAG = "DVRCameraManager" }
@@ -56,13 +64,13 @@ class DVRCameraManager(private val context: Context) {
         val maxVideoSize : Size?
     ) {
         override fun toString() =
-            "CameraInfo(logical=$logicalId, physical=$physicalId, " +
-            "facing=${facingName(facing)}, focalLengths=${focalLengths?.joinToString()}, " +
-            "level=${supportLevelName(supportLevel)}, maxVideo=$maxVideoSize)"
+            "CameraInfo(id=$logicalId, facing=${facingName(facing)}, " +
+            "focal=${focalLengths?.joinToString()}, level=${supportLevelName(supportLevel)}, " +
+            "maxVideo=$maxVideoSize)"
         private fun facingName(f: Int) = when (f) {
             CameraCharacteristics.LENS_FACING_BACK  -> "BACK"
             CameraCharacteristics.LENS_FACING_FRONT -> "FRONT"
-            else -> "EXTERNAL"
+            else -> "EXTERNAL($f)"
         }
         private fun supportLevelName(l: Int) = when (l) {
             CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY  -> "LEGACY"
@@ -85,10 +93,10 @@ class DVRCameraManager(private val context: Context) {
             val all = mutableListOf<CameraInfo>()
             for (id in cm.cameraIdList) {
                 try {
-                    val c = cm.getCameraCharacteristics(id)
+                    val c      = cm.getCameraCharacteristics(id)
                     val facing = c.get(CameraCharacteristics.LENS_FACING) ?: continue
                     val level  = c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
-                        ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
+                                   ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
                     val focal  = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                     val map    = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                     val maxSz  = map?.getOutputSizes(MediaRecorder::class.java)
@@ -101,19 +109,36 @@ class DVRCameraManager(private val context: Context) {
             rearCameraInfo  = all.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
                                  .maxByOrNull { it.focalLengths?.maxOrNull() ?: 0f }
             frontCameraInfo = all.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
-            Log.i(TAG, "REAR:  $rearCameraInfo")
+            Log.i(TAG, "REAR : $rearCameraInfo")
             Log.i(TAG, "FRONT: $frontCameraInfo")
             Pair(rearCameraInfo, frontCameraInfo)
         }
 
     /**
-     * Bind rear AND front preview in CameraX 1.3.x.
+     * Build a CameraSelector that matches one specific logical camera ID.
      *
-     * Key rule: call unbindAll() ONCE, then bind rear, then bind front.
-     * Never call unbindAll() between the two binds — CameraX accumulates
-     * use cases per lifecycle; a second bind without unbind ADDS the use case,
-     * it does not replace the first.
+     * Using DEFAULT_BACK/DEFAULT_FRONT replaces the active CameraX session on each
+     * bindToLifecycle call — the second bind kills the first. Using Camera2CameraInfo
+     * to filter by exact ID lets CameraX keep both sessions open simultaneously.
      */
+    private fun selectorForId(cameraId: String): CameraSelector =
+        CameraSelector.Builder()
+            .addCameraFilter { cameras ->
+                cameras.filter { Camera2CameraInfo.from(it).getCameraId() == cameraId }
+            }
+            .build()
+
+    private fun resolutionSelector(w: Int, h: Int) =
+        ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    Size(w, h),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+
+
     suspend fun startPreview(
         lifecycleOwner   : LifecycleOwner,
         rearPreviewView  : PreviewView,
@@ -123,38 +148,43 @@ class DVRCameraManager(private val context: Context) {
         try {
             if (rearCameraInfo == null || frontCameraInfo == null) enumerateCameras()
 
+            val rearId  = rearCameraInfo?.logicalId
+                ?: throw IllegalStateException("No rear camera found")
+            val frontId = frontCameraInfo?.logicalId
+                ?: throw IllegalStateException("No front camera found")
+
             val provider = getCameraProvider()
             sharedProvider = provider
-            provider.unbindAll()          // ← ONE clear, before anything is bound
+            provider.unbindAll()
 
+            // ── Rear camera ─────────────────────────────────────────────────
             val rearPreview = Preview.Builder()
-                .setTargetResolution(android.util.Size(AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
-                .build().also { it.setSurfaceProvider(rearPreviewView.surfaceProvider) }
+                .setResolutionSelector(resolutionSelector(AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
+                .build()
+                .also { it.setSurfaceProvider(rearPreviewView.surfaceProvider) }
 
+            provider.bindToLifecycle(lifecycleOwner, selectorForId(rearId), rearPreview)
+            Log.i(TAG, "REAR  bound ✅ (id=$rearId)")
+
+            // ── Front camera ─────────────────────────────────────────────────
+            // Explicit ID selector — does NOT replace the rear session above.
             val frontPreview = Preview.Builder()
-                .setResolutionSelector(androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
-                    .setResolutionStrategy(androidx.camera.core.resolutionselector.ResolutionStrategy(
-                        Size(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT),
-                        androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
-                    .build())
-                .build().also { it.setSurfaceProvider(frontPreviewView.surfaceProvider) }
+                .setResolutionSelector(resolutionSelector(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT))
+                .build()
+                .also { it.setSurfaceProvider(frontPreviewView.surfaceProvider) }
 
-            // Bind rear — no unbindAll after this
-            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, rearPreview)
-            Log.i(TAG, "REAR bound ✅")
-
-            // Bind front — accumulates alongside rear, does not replace it
             try {
-                provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, frontPreview)
-                Log.i(TAG, "FRONT bound ✅")
+                provider.bindToLifecycle(lifecycleOwner, selectorForId(frontId), frontPreview)
+                Log.i(TAG, "FRONT bound ✅ (id=$frontId)")
             } catch (e: Exception) {
-                Log.w(TAG, "FRONT bind failed (device may not support concurrent): ${e.message}")
+                Log.w(TAG, "FRONT bind failed — device may not support concurrent preview: ${e.message}")
             }
 
             _state.value = CameraState.Previewing
-            Log.i(TAG, "Dual preview started ✅")
+            Log.i(TAG, "Dual preview running ✅")
+
         } catch (e: Exception) {
-            Log.e(TAG, "Preview failed: ${e.message}", e)
+            Log.e(TAG, "startPreview failed: ${e.message}", e)
             _state.value = CameraState.Error(e.message ?: "Preview failed")
             throw e
         }
@@ -184,4 +214,3 @@ class DVRCameraManager(private val context: Context) {
             }
         }
 }
-

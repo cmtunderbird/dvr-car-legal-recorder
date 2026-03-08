@@ -18,13 +18,27 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.dashcam.dvr.R
-import com.dashcam.dvr.camera.DVRCameraManager
 import com.dashcam.dvr.camera.CameraValidator
+import com.dashcam.dvr.camera.DVRCameraManager
 import com.dashcam.dvr.service.RecordingService
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
+/**
+ * MainActivity
+ *
+ * IMPORTANT — service interaction via binder only:
+ * Button taps call recordingService?.startRecording() / stopRecording() directly.
+ * We NEVER call startForegroundService() from here — that triggers HyperOS camera
+ * security banners which steal focus and minimize the app.
+ *
+ * IMPORTANT — unbind policy:
+ * onStop() does NOT unbind while recording is active. Unbinding kills the
+ * ServiceConnection, sets recordingService = null, and cancels all Flow collectors
+ * — making the timer stop and the button state freeze.
+ * We only unbind when the service is idle (not recording).
+ */
 class MainActivity : AppCompatActivity() {
 
     companion object { private const val TAG = "MainActivity" }
@@ -48,11 +62,12 @@ class MainActivity : AppCompatActivity() {
             recordingService = (binder as RecordingService.RecordingBinder).getService()
             serviceBound = true
             observeServiceState()
-            Log.d(TAG, "Bound to RecordingService")
+            Log.d(TAG, "Bound to RecordingService ✅")
         }
         override fun onServiceDisconnected(name: ComponentName) {
             recordingService = null
             serviceBound = false
+            Log.w(TAG, "Service disconnected unexpectedly")
         }
     }
 
@@ -62,6 +77,9 @@ class MainActivity : AppCompatActivity() {
         if (results.values.all { it }) onPermissionsReady()
         else Toast.makeText(this, "Camera and location permissions are required", Toast.LENGTH_LONG).show()
     }
+
+
+    // ── Lifecycle ──────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,18 +94,36 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        bindService(Intent(this, RecordingService::class.java), serviceConnection, BIND_AUTO_CREATE)
+        // Always (re)bind — safe to call even if already bound; guards against the
+        // case where user returns to app after service was kept alive during recording
+        if (!serviceBound) {
+            bindService(Intent(this, RecordingService::class.java), serviceConnection, BIND_AUTO_CREATE)
+        }
     }
 
     override fun onStop() {
         super.onStop()
-        if (serviceBound) { unbindService(serviceConnection); serviceBound = false }
+        // KEY FIX: Only unbind when the service is idle.
+        // While recording, keep the binding alive so Flow collectors stay active
+        // and the timer keeps ticking when the user returns to the app.
+        val isRecording = recordingService?.state?.value is RecordingService.ServiceState.Recording
+        if (serviceBound && !isRecording) {
+            unbindService(serviceConnection)
+            serviceBound = false
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cameraManager.stopAll()
+        // Final cleanup — unbind if still bound (recording was stopped before destroy)
+        if (serviceBound) {
+            try { unbindService(serviceConnection) } catch (_: Exception) {}
+            serviceBound = false
+        }
     }
+
+    // ── Views & click listeners ────────────────────────────────────────────
 
     private fun bindViews() {
         previewRear     = findViewById(R.id.previewRear)
@@ -101,17 +137,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupClickListeners() {
         btnRecord.setOnClickListener {
-            if (recordingService?.state?.value is RecordingService.ServiceState.Recording)
-                RecordingService.stopRecording(this)
+            val svc = recordingService ?: run {
+                Toast.makeText(this, "Service not ready — please wait", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            // Call directly on service instance via binder — never startForegroundService()
+            if (svc.state.value is RecordingService.ServiceState.Recording)
+                svc.stopRecording()
             else
-                RecordingService.startRecording(this)
+                svc.startRecording()
         }
         btnEvent.setOnClickListener {
-            RecordingService.triggerManualEvent(this)
+            recordingService?.triggerEvent()
             Toast.makeText(this, "⚡ Event saved!", Toast.LENGTH_SHORT).show()
         }
     }
 
+
+    // ── Permissions ────────────────────────────────────────────────────────
 
     private fun checkAndRequestPermissions() {
         val required = buildList {
@@ -127,20 +170,23 @@ class MainActivity : AppCompatActivity() {
         val missing = required.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) onPermissionsReady() else permissionLauncher.launch(missing.toTypedArray())
+        if (missing.isEmpty()) onPermissionsReady()
+        else permissionLauncher.launch(missing.toTypedArray())
     }
 
     private fun onPermissionsReady() {
-        Log.i(TAG, "All permissions granted — starting camera")
+        Log.i(TAG, "All permissions granted")
         runCameraValidation()
         startDualPreview()
     }
+
+    // ── Camera ─────────────────────────────────────────────────────────────
 
     private fun runCameraValidation() {
         lifecycleScope.launch {
             val result = cameraValidator.validate()
             if (!result.isViable) {
-                tvCameraStatus.text = "⚠️ Camera issue detected"
+                tvCameraStatus.text = "⚠️ Camera issue"
                 tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
             } else {
                 val dual = if (result.hasDualCameras) "Dual ✅" else "Single ⚠️"
@@ -159,15 +205,12 @@ class MainActivity : AppCompatActivity() {
                     rearPreviewView  = previewRear,
                     frontPreviewView = previewFront
                 )
-                val rearId  = rear?.logicalId  ?: "N/A"
-                val frontId = front?.logicalId ?: "N/A"
-                tvCameraStatus.text = "📷 R:$rearId  F:$frontId"
+                tvCameraStatus.text = "📷 R:${rear?.logicalId ?: "N/A"}  F:${front?.logicalId ?: "N/A"}"
             } catch (e: Exception) {
                 Log.e(TAG, "Camera start failed: ${e.message}", e)
                 tvCameraStatus.text = "❌ ${e.message}"
             }
         }
-
         lifecycleScope.launch {
             cameraManager.state.collectLatest { state ->
                 when (state) {
@@ -183,8 +226,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── Service state observers ────────────────────────────────────────────
+
     private fun observeServiceState() {
-        // ── Recording state → button + colour ─────────────────────────────
         lifecycleScope.launch {
             recordingService?.state?.collectLatest { state ->
                 when (state) {
@@ -208,14 +252,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-
-        // ── Timer — driven by elapsedSeconds from the service ──────────────
         lifecycleScope.launch {
             recordingService?.elapsedSeconds?.collectLatest { secs ->
-                val h = secs / 3600
-                val m = (secs % 3600) / 60
-                val s = secs % 60
-                tvTimer.text = "%02d:%02d:%02d".format(h, m, s)
+                tvTimer.text = "%02d:%02d:%02d".format(secs / 3600, (secs % 3600) / 60, secs % 60)
             }
         }
     }
