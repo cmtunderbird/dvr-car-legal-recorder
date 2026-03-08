@@ -12,6 +12,9 @@
     <uses-feature android:name="android.hardware.sensor.gyroscope"     android:required="true" />
     <uses-feature android:name="android.hardware.sensor.compass"       android:required="false" />
     <uses-feature android:name="android.hardware.sensor.barometer"     android:required="false" />
+    <!-- Required for 100 Hz IMU on Android 12+ (API 31+). Without this the OS
+         silently caps sensor delivery to ~50 Hz for apps targeting API 31+. -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
@@ -61,8 +64,11 @@
             android:screenOrientation="landscape"
             tools:ignore="MissingClass" />
 
-        <!-- LOCATION type only. CAMERA+MICROPHONE types trigger HyperOS full-screen
-             privacy overlay which steals focus and minimizes the app. -->
+        <!-- foregroundServiceType: location ONLY.
+             camera/microphone types trigger HyperOS full-screen privacy overlay
+             which steals window focus and minimises the app. Camera sessions are
+             owned by DVRCameraManager/CameraX in the Activity lifecycle.
+             Location is legitimate for continuous GPS telemetry. -->
         <service
             android:name=".service.RecordingService"
             android:exported="false"
