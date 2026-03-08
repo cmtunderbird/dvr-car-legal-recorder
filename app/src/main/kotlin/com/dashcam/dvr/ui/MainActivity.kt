@@ -7,6 +7,7 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.IBinder
 import android.util.Log
 import android.view.WindowManager
@@ -21,23 +22,15 @@ import com.dashcam.dvr.R
 import com.dashcam.dvr.camera.CameraValidator
 import com.dashcam.dvr.camera.DVRCameraManager
 import com.dashcam.dvr.service.RecordingService
+import com.dashcam.dvr.util.AppConstants
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-/**
- * MainActivity
- *
- * SERVICE BINDING — bindService() ONLY, never startForegroundService():
- *
- * startForegroundService() from onStart() causes an INFINITE LOOP on HyperOS:
- *   onStart() → startForegroundService() → HyperOS banner → app minimizes
- *   → onStop() → user returns → onStart() → banner again → loop forever
- *
- * Fix: Activity calls bindService(BIND_AUTO_CREATE) only.
- * The service promotes itself to foreground from its own onCreate() —
- * no Activity involvement, no banner loop.
- */
 class MainActivity : AppCompatActivity() {
 
     companion object { private const val TAG = "MainActivity" }
@@ -55,6 +48,7 @@ class MainActivity : AppCompatActivity() {
 
     private var recordingService: RecordingService? = null
     private var serviceBound = false
+    private var currentSessionDir: File? = null
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -66,7 +60,7 @@ class MainActivity : AppCompatActivity() {
         override fun onServiceDisconnected(name: ComponentName) {
             recordingService = null
             serviceBound = false
-            Log.w(TAG, "Service disconnected unexpectedly")
+            Log.w(TAG, "Service disconnected")
         }
     }
 
@@ -74,7 +68,7 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         if (results.values.all { it }) onPermissionsReady()
-        else Toast.makeText(this, "Camera and location permissions are required", Toast.LENGTH_LONG).show()
+        else Toast.makeText(this, "Camera and location permissions required", Toast.LENGTH_LONG).show()
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -92,21 +86,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        // bindService ONLY — never startForegroundService() here.
-        // The service promotes itself to foreground from its own onCreate().
-        // Calling startForegroundService() here creates an infinite banner loop on HyperOS.
         if (!serviceBound) {
-            bindService(
-                Intent(this, RecordingService::class.java),
-                serviceConnection,
-                BIND_AUTO_CREATE
-            )
+            bindService(Intent(this, RecordingService::class.java),
+                serviceConnection, BIND_AUTO_CREATE)
         }
     }
 
     override fun onStop() {
         super.onStop()
-        // Keep binding alive during any active state (Starting, Recording, Stopping).
         val state = recordingService?.state?.value
         val isActive = state is RecordingService.ServiceState.Recording ||
                        state is RecordingService.ServiceState.Starting  ||
@@ -162,12 +149,12 @@ class MainActivity : AppCompatActivity() {
             add(Manifest.permission.CAMERA)
             add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.ACCESS_FINE_LOCATION)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 add(Manifest.permission.READ_MEDIA_VIDEO)
-            else
+            } else {
                 add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
         }
         val missing = required.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -224,6 +211,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── Session directory ─────────────────────────────────────────────────
+
+    private fun createSessionDir(): File {
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val base = File(getExternalFilesDir(null), "DVR")
+        return File(base, "${AppConstants.SESSION_DIR_PREFIX}$ts").also { it.mkdirs() }
+    }
+
     // ── Service observers ─────────────────────────────────────────────────
 
     private fun observeServiceState() {
@@ -235,6 +230,18 @@ class MainActivity : AppCompatActivity() {
                         btnRecord.backgroundTintList =
                             ContextCompat.getColorStateList(this@MainActivity, R.color.dvr_red)
                         btnEvent.isEnabled = true
+                        // Wire: service started recording → start actual camera recording
+                        val sessionDir = createSessionDir().also { currentSessionDir = it }
+                        val started = cameraManager.startVideoRecording(sessionDir)
+                        if (started) {
+                            Log.i(TAG, "Video recording wired → ${sessionDir.absolutePath}")
+                            Toast.makeText(this@MainActivity,
+                                "Recording to DVR/${sessionDir.name}", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Log.e(TAG, "startVideoRecording returned false")
+                            Toast.makeText(this@MainActivity,
+                                "Camera not ready — retrying", Toast.LENGTH_SHORT).show()
+                        }
                     }
                     is RecordingService.ServiceState.Idle -> {
                         btnRecord.text = getString(R.string.start_recording)
@@ -242,16 +249,24 @@ class MainActivity : AppCompatActivity() {
                             ContextCompat.getColorStateList(this@MainActivity, R.color.dvr_teal)
                         btnEvent.isEnabled = false
                         tvTimer.text = "00:00:00"
+                        // Wire: service stopped → stop camera recording
+                        cameraManager.stopVideoRecording()
+                        currentSessionDir?.let {
+                            Log.i(TAG, "Session saved to: ${it.absolutePath}")
+                        }
+                        currentSessionDir = null
                     }
                     is RecordingService.ServiceState.Error ->
-                        Toast.makeText(this@MainActivity, "Error: ${state.message}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this@MainActivity,
+                            "Error: ${state.message}", Toast.LENGTH_LONG).show()
                     else -> {}
                 }
             }
         }
         lifecycleScope.launch {
             recordingService?.elapsedSeconds?.collectLatest { secs ->
-                tvTimer.text = "%02d:%02d:%02d".format(secs / 3600, (secs % 3600) / 60, secs % 60)
+                tvTimer.text = "%02d:%02d:%02d"
+                    .format(secs / 3600, (secs % 3600) / 60, secs % 60)
             }
         }
     }
