@@ -20,60 +20,61 @@ import kotlin.math.sqrt
  * ───────────────────────────────────────
  *
  * Layer 1 — Road quality (RoadQualityMonitor):
- *   Raises the trigger threshold on rough roads so potholes and speed bumps
- *   do not fire events. SMOOTH / ROUGH / VERY_ROUGH adaptive thresholds.
+ *   Adaptive threshold based on road surface vertical RMS.
  *
  * Layer 2 — Maneuver subtraction (ManeuverContext):
- *   Subtracts expected vehicle dynamics from the raw IMU signal:
+ *   ax_residual = ax − a_longitudinal (GPS dV/dt)
+ *   ay_residual = ay − a_centripetal  (gyro × speed)
+ *   Threshold applied to residual vector, not raw IMU.
+ *   Falls back to raw IMU when GPS fix is stale or speed < 5 km/h.
  *
- *     ax_residual = ax_measured − a_longitudinal   (GPS dV/dt braking/throttle)
- *     ay_residual = ay_measured − a_centripetal    (v × ω cornering)
- *
- *   Without this layer:
- *     Hard braking at 0.8g → IMU shows 0.8g → below 3g threshold (lucky)
- *     But threshold is 3g, and emergency stop at 1.2g with a pothole adds up
- *   With this layer:
- *     Emergency stop at 1.2g → GPS explains 1.2g → residual ≈ 0 → no trigger
- *     Cornering at 0.4g → gyro explains 0.4g → residual ≈ 0 → no trigger
- *     Real rear-end at 3g → GPS shows simultaneous deceleration BUT the delta
- *     between expected and actual is still > threshold → confirmed collision
- *
- *   ManeuverContext.isValid() returns false when:
- *     - No GPS fix, or fix is stale (> 2s)
- *     - Speed < 5 km/h (GPS speed noise floor)
- *   When invalid → falls back to raw IMU mode (conservative, keeps sensitivity).
- *
- * Layer 3 — Vertical dominance test (axis decomposition):
+ * Layer 3 — Vertical dominance (axis decomposition):
  *   horiz_frac = lateral_residual / total_residual
- *   If below road-state minimum → ROAD_IMPACT (suppressed, telemetry only)
+ *   Below road-state minimum → ROAD_IMPACT (telemetry only).
  *
- * DURATION GATE (Blueprint §8):
- *   Spike must sustain threshold for ≥ IMPACT_DURATION_MS (20 ms).
- *   Sub-20ms spikes → ROAD_IMPACT regardless of magnitude.
+ * GRAVITY SOURCE — GravityProvider (Fix for Bug 1 + Bug 3)
+ * ──────────────────────────────────────────────────────────
+ * Previously: independent gravityEma = -9.807f (hardcoded, wrong sign for
+ * face-up phone). Error at t=0 was 19 m/s² = 1.94g. Never fully converged in
+ * a 33-second session. Both CollisionDetector and RoadQualityMonitor had their
+ * own diverging EMAs.
  *
- * DIRECTION CLASSIFICATION (Blueprint §9 — uses residual vector):
- *   FRONT_IMPACT   — ax_residual dominant, ax < 0  (frontal collision)
- *   REAR_IMPACT    — ax_residual dominant, ax > 0  (struck from behind)
- *   LATERAL_LEFT   — ay_residual dominant, ay < 0
- *   LATERAL_RIGHT  — ay_residual dominant, ay > 0
- *   ROAD_IMPACT    — az_net dominant OR horiz_frac too low
+ * Now: GravityProvider delivers TYPE_GRAVITY (hardware HAL, zero warmup,
+ * correct sign) or a first-sample-initialised EMA fallback. Single shared
+ * instance — both components read the same gravity vector.
  *
- * COLLISION RECORD (forensic evidence fields):
- *   peak_g, ax_g, ay_g, az_net_g — raw IMU peak values
- *   expected_ax_g, expected_ay_g — ManeuverContext prediction at moment of event
- *   residual_g                   — net residual that crossed the threshold
- *   speed_kmh                    — vehicle speed from GPS at moment of event
- *   road_state                   — road quality classification
- *   fusion_valid                 — true = maneuver subtraction was applied
+ * STATE MACHINE PRIORITY FIX (Fix for Bug 2)
+ * ────────────────────────────────────────────
+ * Previous code checked !stillAbove BEFORE the duration gate:
+ *   if (!stillAbove) → ROAD_IMPACT
+ *   else if (dur ≥ 20ms) → CONFIRMED
  *
- * STATE MACHINE:
- *   IDLE → ARMED → TRIGGERED (≥20ms) → COOLDOWN (2s) → IDLE
- *   IDLE → ARMED → IDLE  (sub-duration = road impact)
+ * This caused a 5.27g lateral shake sustained exactly 20ms to be classified
+ * ROAD_IMPACT because the magnitude dropped on the same sample the duration
+ * gate fired — the gate lost the race.
+ *
+ * Fixed order:
+ *   if (dur ≥ 20ms AND stillAbove) → CONFIRMED   ← duration gate wins
+ *   else if (!stillAbove) → ROAD_IMPACT           ← only if gate not yet met
+ *
+ * ADAPTIVE THRESHOLDS (road state):
+ *   SMOOTH:      trigger ≥ 3.0g, horiz_frac ≥ 0.35
+ *   ROUGH:       trigger ≥ 3.5g, horiz_frac ≥ 0.45
+ *   VERY_ROUGH:  trigger ≥ 4.5g, horiz_frac ≥ 0.65
+ *
+ * DIRECTION CLASSIFICATION (on confirmed residual vector):
+ *   FRONT_IMPACT / REAR_IMPACT / LATERAL_LEFT / LATERAL_RIGHT / ROAD_IMPACT
+ *
+ * CollisionRecord forensic fields:
+ *   expected_ax_g, expected_ay_g  — ManeuverContext prediction
+ *   residual_g                    — magnitude that crossed the threshold
+ *   speed_kmh, fusion_valid       — GPS context at event time
  */
 class CollisionDetector(
     private val ntpManager:      NtpSyncManager,
     private val roadMonitor:     RoadQualityMonitor,
     private val maneuverContext: ManeuverContext,
+    private val gravityProvider: GravityProvider,
     private val onEvent:         (ImpactEvent) -> Unit,
     var writeCallback: ((CollisionRecord) -> Unit)? = null
 ) {
@@ -92,11 +93,7 @@ class CollisionDetector(
         )
         private val COOLDOWN_NS = AppConstants.IMPACT_COOLDOWN_MS * 1_000_000L
         private val DURATION_NS = AppConstants.IMPACT_DURATION_MS * 1_000_000L
-        private const val GRAVITY_EMA_ALPHA = 0.001f
     }
-
-    // ── Gravity EMA (independent; for az_net computation) ────────────────────
-    private var gravityEma = -AppConstants.GRAVITY_MS2
 
     // ── State machine ─────────────────────────────────────────────────────────
     private enum class State { IDLE, ARMED, COOLDOWN }
@@ -104,15 +101,14 @@ class CollisionDetector(
     private var armedTs       = 0L
     private var cooldownEndTs = 0L
 
-    // Peak values captured during ARMED phase (raw IMU)
-    private var peakG       = 0f
-    private var peakAx      = 0f
-    private var peakAy      = 0f
-    private var peakAzNet   = 0f
-    // Expected at peak moment (for CollisionRecord evidence)
-    private var peakExpLong = 0f
-    private var peakExpLat  = 0f
-    private var peakResidG  = 0f
+    // Peak values captured during ARMED phase
+    private var peakG          = 0f
+    private var peakAx         = 0f
+    private var peakAy         = 0f
+    private var peakAzNet      = 0f
+    private var peakExpLong    = 0f
+    private var peakExpLat     = 0f
+    private var peakResidG     = 0f
     private var peakFusionValid = false
 
     // ── Entry points ──────────────────────────────────────────────────────────
@@ -123,52 +119,58 @@ class CollisionDetector(
         val ay    = record.ay
         val az    = record.az
 
-        // Update gravity EMA
-        gravityEma = gravityEma + GRAVITY_EMA_ALPHA * (az - gravityEma)
-        val azNet  = az - gravityEma
+        // ── Gravity from shared GravityProvider (Fix 1+3) ────────────────────
+        // No local EMA, no hardcoded constant, no sign assumption.
+        val gz    = gravityProvider.gz
+        val azNet = az - gz
 
         // ── Layer 2: Maneuver subtraction ─────────────────────────────────────
         val fusionValid = maneuverContext.isValid(nowNs)
         val expLong     = if (fusionValid) maneuverContext.expectedLongMs2() else 0f
         val expLat      = if (fusionValid) maneuverContext.expectedLatMs2()  else 0f
 
-        val axResidual  = ax - expLong
-        val ayResidual  = ay - expLat
-        // az residual: road monitor already handles vertical; no centripetal component
+        val axResidual = ax - expLong
+        val ayResidual = ay - expLat
 
         // ── Layer 1+3: Road quality + axis decomposition ──────────────────────
-        val lateralSqR  = axResidual * axResidual + ayResidual * ayResidual
-        val lateralR    = sqrt(lateralSqR)
-        val totalVecR   = sqrt(lateralSqR + azNet * azNet)
+        val lateralSq  = axResidual * axResidual + ayResidual * ayResidual
+        val lateral    = sqrt(lateralSq)
+        val totalVec   = sqrt(lateralSq + azNet * azNet)
 
-        val residualG   = totalVecR / AppConstants.GRAVITY_MS2
-        val horizFrac   = if (totalVecR > 0f) lateralR / totalVecR else 0f
+        val residualG  = totalVec / AppConstants.GRAVITY_MS2
+        val horizFrac  = if (totalVec > 0f) lateral / totalVec else 0f
 
-        val roadState   = roadMonitor.currentState
-        val threshG     = THRESHOLD_G[roadState]!!
-        val minHoriz    = MIN_HORIZ_FRAC[roadState]!!
+        val roadState  = roadMonitor.currentState
+        val threshG    = THRESHOLD_G[roadState]!!
+        val minHoriz   = MIN_HORIZ_FRAC[roadState]!!
 
         when (state) {
+
             State.COOLDOWN -> {
                 if (nowNs >= cooldownEndTs) {
                     state = State.IDLE
-                    Log.d(TAG, "Cooldown ended — IDLE  fusion=${fusionValid}")
+                    Log.d(TAG, "Cooldown ended → IDLE")
                 }
             }
 
             State.IDLE -> {
-                if (residualG >= threshG && horizFrac >= minHoriz) {
-                    state       = State.ARMED
-                    armedTs     = nowNs
-                    captureArmPeak(residualG, ax, ay, azNet, expLong, expLat, fusionValid)
-                    Log.d(TAG, "ARMED  residualG=${residualG}g  horizFrac=${horizFrac}" +
-                        "  road=$roadState  fusion=$fusionValid" +
-                        "  expLong=${expLong/AppConstants.GRAVITY_MS2}g" +
-                        "  expLat=${expLat/AppConstants.GRAVITY_MS2}g")
-                } else if (residualG >= threshG && horizFrac < minHoriz) {
-                    // Vertical dominant at threshold → road impact, no duration gate needed
-                    emitRoadImpact(nowNs, residualG, ax, ay, azNet,
-                        expLong, expLat, roadState, "horiz_frac_below_min", record.tsUtc)
+                if (nowNs < cooldownEndTs) { state = State.COOLDOWN; return }
+                when {
+                    residualG >= threshG && horizFrac >= minHoriz -> {
+                        state   = State.ARMED
+                        armedTs = nowNs
+                        captureArmPeak(residualG, ax, ay, azNet, expLong, expLat, fusionValid)
+                        Log.d(TAG, "ARMED  residualG=%.3fg  horizFrac=%.3f  road=$roadState".format(
+                            residualG, horizFrac) +
+                            "  expLong=%.3fg  expLat=%.3fg  gz=%.3f".format(
+                            expLong / AppConstants.GRAVITY_MS2,
+                            expLat  / AppConstants.GRAVITY_MS2, gz))
+                    }
+                    residualG >= threshG -> {
+                        // Vertical dominant at threshold — road impact, no gate needed
+                        emitRoadImpact(nowNs, residualG, ax, ay, azNet,
+                            expLong, expLat, roadState, "horiz_frac_below_min", record.tsUtc)
+                    }
                 }
             }
 
@@ -176,35 +178,42 @@ class CollisionDetector(
                 if (residualG > peakResidG) {
                     captureArmPeak(residualG, ax, ay, azNet, expLong, expLat, fusionValid)
                 }
-                val stillAbove  = residualG >= threshG && horizFrac >= minHoriz
                 val durationNs  = nowNs - armedTs
+                val stillAbove  = residualG >= threshG && horizFrac >= minHoriz
 
-                if (!stillAbove) {
-                    val durMs = durationNs / 1_000_000L
-                    Log.d(TAG, "Spike dropped at ${durMs}ms < ${AppConstants.IMPACT_DURATION_MS}ms → ROAD_IMPACT")
-                    emitRoadImpact(nowNs, peakResidG, peakAx, peakAy, peakAzNet,
-                        peakExpLong, peakExpLat, roadState, "duration_gate_${durMs}ms", record.tsUtc)
-                    state = State.IDLE
-                } else if (durationNs >= DURATION_NS) {
-                    confirmCollision(nowNs, durationNs / 1_000_000L, roadState, record.tsUtc)
+                // ── BUG 2 FIX: duration gate checked BEFORE !stillAbove ──────
+                // Old: if (!stillAbove) → ROAD_IMPACT  ELSE IF dur≥20ms → CONFIRM
+                //   → duration gate lost the race when both fired on same sample
+                // New: if (dur≥20ms AND stillAbove) → CONFIRM  (gate wins)
+                //      else if (!stillAbove) → ROAD_IMPACT (only if gate not met)
+                when {
+                    durationNs >= DURATION_NS && stillAbove -> {
+                        confirmCollision(nowNs, durationNs / 1_000_000L, roadState, record.tsUtc)
+                    }
+                    !stillAbove -> {
+                        val durMs = durationNs / 1_000_000L
+                        Log.d(TAG, "Spike lost at ${durMs}ms < ${AppConstants.IMPACT_DURATION_MS}ms → ROAD_IMPACT")
+                        emitRoadImpact(nowNs, peakResidG, peakAx, peakAy, peakAzNet,
+                            peakExpLong, peakExpLat, roadState,
+                            "duration_gate_${durMs}ms", record.tsUtc)
+                        state = State.IDLE
+                    }
                 }
             }
         }
     }
 
     fun onGyroSample(record: GyroRecord) {
-        // ManeuverContext already has its own gyro fan-out — but we keep this
-        // hook here so CollisionDetector can optionally use gyro in the future
-        // (e.g. rotation-rate burst detection for rollover — Module 8+)
+        // Reserved for rollover / rotation-burst detection (future module)
     }
 
     fun reset() {
         state = State.IDLE; peakG = 0f; peakResidG = 0f
-        gravityEma = -AppConstants.GRAVITY_MS2
+        armedTs = 0L; cooldownEndTs = 0L
         maneuverContext.reset()
     }
 
-    // ── Private ───────────────────────────────────────────────────────────────
+    // ── Private helpers ───────────────────────────────────────────────────────
 
     private fun captureArmPeak(
         residG: Float, ax: Float, ay: Float, azNet: Float,
@@ -212,8 +221,8 @@ class CollisionDetector(
     ) {
         peakResidG      = residG
         peakG           = sqrt(ax*ax + ay*ay + azNet*azNet) / AppConstants.GRAVITY_MS2
-        peakAx          = ax; peakAy = ay; peakAzNet = azNet
-        peakExpLong     = expLong; peakExpLat = expLat
+        peakAx = ax; peakAy = ay; peakAzNet = azNet
+        peakExpLong = expLong; peakExpLat = expLat
         peakFusionValid = fusionValid
     }
 
@@ -223,9 +232,10 @@ class CollisionDetector(
         val direction = classifyDirection(
             peakAx - peakExpLong, peakAy - peakExpLat, peakAzNet
         )
-        Log.w(TAG, "COLLISION CONFIRMED  dir=$direction  peak=${peakG}g" +
-            "  residual=${peakResidG}g  dur=${durationMs}ms  road=$roadState" +
-            "  fusion=$peakFusionValid  speed=${maneuverContext.currentSpeedMs * 3.6f}km/h")
+        Log.w(TAG, "COLLISION CONFIRMED  dir=$direction  peak=%.3fg  residual=%.3fg  dur=${durationMs}ms"
+            .format(peakG, peakResidG) +
+            "  road=$roadState  fusion=$peakFusionValid  speed=%.1fkm/h"
+            .format(maneuverContext.currentSpeedMs * 3.6f))
 
         val event = ImpactEvent(
             tsMonoNs   = tsMonoNs,
@@ -233,8 +243,8 @@ class CollisionDetector(
             direction  = direction,
             peakG      = peakG,
             durationMs = durationMs,
-            axG        = peakAx / AppConstants.GRAVITY_MS2,
-            ayG        = peakAy / AppConstants.GRAVITY_MS2,
+            axG        = peakAx    / AppConstants.GRAVITY_MS2,
+            ayG        = peakAy    / AppConstants.GRAVITY_MS2,
             azNetG     = peakAzNet / AppConstants.GRAVITY_MS2,
             roadState  = roadState.name,
             confirmed  = true
@@ -252,27 +262,25 @@ class CollisionDetector(
         expLong: Float, expLat: Float,
         roadState: RoadState, reason: String, tsUtc: String
     ) {
-        Log.d(TAG, "ROAD_IMPACT  residualG=${residG}g  reason=$reason  road=$roadState" +
-            "  fusion=$peakFusionValid")
-        // ROAD_IMPACT: telemetry only, does NOT fire onEvent()
+        Log.d(TAG, "ROAD_IMPACT  residualG=%.3fg  reason=$reason  road=$roadState".format(residG))
         writeCallback?.invoke(
             CollisionRecord(
-                tsMonoNs      = tsMonoNs,
-                tsUtc         = ntpManager.correctedUtcNow(),
-                direction     = "ROAD_IMPACT",
-                peakG         = sqrt(ax*ax + ay*ay + azNet*azNet) / AppConstants.GRAVITY_MS2,
-                durationMs    = 0L,
-                axG           = ax    / AppConstants.GRAVITY_MS2,
-                ayG           = ay    / AppConstants.GRAVITY_MS2,
-                azNetG        = azNet / AppConstants.GRAVITY_MS2,
-                roadState     = roadState.name,
-                confirmed     = false,
-                suppressed    = true,
-                expectedAxG   = expLong / AppConstants.GRAVITY_MS2,
-                expectedAyG   = expLat  / AppConstants.GRAVITY_MS2,
-                residualG     = residG,
-                speedKmh      = maneuverContext.currentSpeedMs * 3.6f,
-                fusionValid   = peakFusionValid
+                tsMonoNs     = tsMonoNs,
+                tsUtc        = ntpManager.correctedUtcNow(),
+                direction    = "ROAD_IMPACT",
+                peakG        = sqrt(ax*ax + ay*ay + azNet*azNet) / AppConstants.GRAVITY_MS2,
+                durationMs   = 0L,
+                axG          = ax    / AppConstants.GRAVITY_MS2,
+                ayG          = ay    / AppConstants.GRAVITY_MS2,
+                azNetG       = azNet / AppConstants.GRAVITY_MS2,
+                roadState    = roadState.name,
+                confirmed    = false,
+                suppressed   = true,
+                expectedAxG  = expLong / AppConstants.GRAVITY_MS2,
+                expectedAyG  = expLat  / AppConstants.GRAVITY_MS2,
+                residualG    = residG,
+                speedKmh     = maneuverContext.currentSpeedMs * 3.6f,
+                fusionValid  = peakFusionValid
             )
         )
     }
@@ -300,9 +308,9 @@ class CollisionDetector(
     )
 
     private fun classifyDirection(axRes: Float, ayRes: Float, azNet: Float): String {
-        val absAx    = kotlin.math.abs(axRes)
-        val absAy    = kotlin.math.abs(ayRes)
-        val absAzNet = kotlin.math.abs(azNet)
+        val absAx    = abs(axRes)
+        val absAy    = abs(ayRes)
+        val absAzNet = abs(azNet)
         return when {
             absAzNet > absAx && absAzNet > absAy -> "ROAD_IMPACT"
             absAx   >= absAy                      -> if (axRes < 0f) "FRONT_IMPACT" else "REAR_IMPACT"

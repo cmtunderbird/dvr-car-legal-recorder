@@ -21,6 +21,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import com.dashcam.dvr.collision.CollisionDetector
 import com.dashcam.dvr.collision.EventsLog
+import com.dashcam.dvr.collision.GravityProvider
 import com.dashcam.dvr.collision.ManeuverContext
 import com.dashcam.dvr.collision.RoadQualityMonitor
 import com.dashcam.dvr.collision.model.ImpactEvent
@@ -97,6 +98,7 @@ class RecordingService : LifecycleService() {
         // ── Module 5: Collision + Road Quality ───────────────────────────────────
     private val _collisionEvents = MutableSharedFlow<ImpactEvent>(extraBufferCapacity = 8)
     val collisionEvents = _collisionEvents.asSharedFlow()
+    private lateinit var gravityProvider:   GravityProvider
     private lateinit var maneuverContext:   ManeuverContext
     private lateinit var roadMonitor:       RoadQualityMonitor
     private lateinit var collisionDetector: CollisionDetector
@@ -290,6 +292,7 @@ class RecordingService : LifecycleService() {
                     _state.value = ServiceState.Error(e.message ?: "Unknown error")
                 }
                 telemetryEngine.stop()
+            gravityProvider.stop()                     // unregister TYPE_GRAVITY sensor
                             // Module 5: detach write callbacks (detectors stay alive, just stop writing)
             roadMonitor.writeCallback       = null
             collisionDetector.writeCallback = null
@@ -322,6 +325,7 @@ class RecordingService : LifecycleService() {
             telemetryEngine.stop()
 
 
+            gravityProvider.stop()                     // unregister TYPE_GRAVITY sensor
             // Module 5: detach write callbacks and reset detectors
             roadMonitor.writeCallback       = null
             collisionDetector.writeCallback = null
@@ -395,13 +399,20 @@ class RecordingService : LifecycleService() {
     // live GNSS fix status at all times, not just during a recording session.
     private fun startGpsMonitorLoop() {
         gpsMonitorJob?.cancel()
-                // Module 5: create detectors — they subscribe to accel/gyro fan-out
+                // Module 5: create detectors - GravityProvider is shared source of truth
+                // (Fix 1+3: replaces two independent wrong-sign gravity EMAs)
+        gravityProvider   = GravityProvider(this)
+        gravityProvider.start()                        // registers TYPE_GRAVITY sensor
         maneuverContext   = ManeuverContext()
-        roadMonitor       = RoadQualityMonitor(telemetryEngine.ntpManager)
+        roadMonitor       = RoadQualityMonitor(
+            ntpManager      = telemetryEngine.ntpManager,
+            gravityProvider = gravityProvider
+        )
         collisionDetector = CollisionDetector(
             ntpManager      = telemetryEngine.ntpManager,
             roadMonitor     = roadMonitor,
             maneuverContext = maneuverContext,
+            gravityProvider = gravityProvider,
             onEvent         = { event -> handleImpactEvent(event) }
         )
         gpsMonitorJob = lifecycleScope.launch {
