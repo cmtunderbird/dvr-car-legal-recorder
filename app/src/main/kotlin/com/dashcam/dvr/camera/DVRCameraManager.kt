@@ -8,10 +8,10 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import android.util.Size
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ConcurrentCamera
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -28,16 +28,21 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * DVRCameraManager — Dual Camera Pipeline (CameraX 1.3.x)
+ * DVRCameraManager — Dual concurrent camera pipeline (CameraX 1.4.x)
  *
- * FRONT CAMERA FIX:
- * Using DEFAULT_FRONT_CAMERA / DEFAULT_BACK_CAMERA replaces the active camera
- * session on each bindToLifecycle call — so rear always won, front was always black.
+ * XIAOMI / HyperOS ISSUE:
+ * getAvailableConcurrentCameraInfos() returns EMPTY on many Xiaomi devices even
+ * though the hardware physically supports simultaneous front+back streaming.
+ * This is a known OEM HAL reporting bug (documented for Poco X3, Redmi series).
  *
- * Fix: Build an explicit CameraSelector per logical camera ID using Camera2CameraInfo.
- * CameraX then opens each camera as a distinct session, both run concurrently.
+ * FIX — Three-tier strategy:
+ *   1. Try official concurrent pair from getAvailableConcurrentCameraInfos()
+ *   2. If empty, FORCE concurrent bind with DEFAULT_BACK + DEFAULT_FRONT anyway
+ *      (works on most Xiaomi despite empty concurrent list)
+ *   3. If that throws, fall back to rear-only
  *
- * Both Preview instances use ResolutionSelector (deprecated setTargetResolution removed).
+ * Both tiers use the list-overload bindToLifecycle(List<SingleCameraConfig>) which
+ * opens two independent camera sessions atomically.
  */
 @SuppressLint("UnsafeOptInUsageError")
 class DVRCameraManager(private val context: Context) {
@@ -64,9 +69,7 @@ class DVRCameraManager(private val context: Context) {
         val maxVideoSize : Size?
     ) {
         override fun toString() =
-            "CameraInfo(id=$logicalId, facing=${facingName(facing)}, " +
-            "focal=${focalLengths?.joinToString()}, level=${supportLevelName(supportLevel)}, " +
-            "maxVideo=$maxVideoSize)"
+            "CameraInfo(id=$logicalId, facing=${facingName(facing)}, level=${supportLevelName(supportLevel)}, maxVideo=$maxVideoSize)"
         private fun facingName(f: Int) = when (f) {
             CameraCharacteristics.LENS_FACING_BACK  -> "BACK"
             CameraCharacteristics.LENS_FACING_FRONT -> "FRONT"
@@ -86,7 +89,6 @@ class DVRCameraManager(private val context: Context) {
     private var sharedProvider: ProcessCameraProvider? = null
 
 
-    @SuppressLint("UnsafeOptInUsageError")
     suspend fun enumerateCameras(): Pair<CameraInfo?, CameraInfo?> =
         withContext(Dispatchers.IO) {
             val cm = context.getSystemService(Context.CAMERA_SERVICE) as AndroidCameraManager
@@ -114,30 +116,12 @@ class DVRCameraManager(private val context: Context) {
             Pair(rearCameraInfo, frontCameraInfo)
         }
 
-    /**
-     * Build a CameraSelector that matches one specific logical camera ID.
-     *
-     * Using DEFAULT_BACK/DEFAULT_FRONT replaces the active CameraX session on each
-     * bindToLifecycle call — the second bind kills the first. Using Camera2CameraInfo
-     * to filter by exact ID lets CameraX keep both sessions open simultaneously.
-     */
-    private fun selectorForId(cameraId: String): CameraSelector =
-        CameraSelector.Builder()
-            .addCameraFilter { cameras ->
-                cameras.filter { Camera2CameraInfo.from(it).getCameraId() == cameraId }
-            }
-            .build()
-
     private fun resolutionSelector(w: Int, h: Int) =
         ResolutionSelector.Builder()
-            .setResolutionStrategy(
-                ResolutionStrategy(
-                    Size(w, h),
-                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                )
-            )
+            .setResolutionStrategy(ResolutionStrategy(
+                Size(w, h),
+                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
             .build()
-
 
     suspend fun startPreview(
         lifecycleOwner   : LifecycleOwner,
@@ -147,46 +131,94 @@ class DVRCameraManager(private val context: Context) {
         _state.value = CameraState.Initialising
         try {
             if (rearCameraInfo == null || frontCameraInfo == null) enumerateCameras()
-
-            val rearId  = rearCameraInfo?.logicalId
-                ?: throw IllegalStateException("No rear camera found")
-            val frontId = frontCameraInfo?.logicalId
-                ?: throw IllegalStateException("No front camera found")
-
             val provider = getCameraProvider()
             sharedProvider = provider
             provider.unbindAll()
 
-            // ── Rear camera ─────────────────────────────────────────────────
-            val rearPreview = Preview.Builder()
-                .setResolutionSelector(resolutionSelector(AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
-                .build()
-                .also { it.setSurfaceProvider(rearPreviewView.surfaceProvider) }
+            // ── Step 1: Try official concurrent pair from HAL ─────────────────
+            val concurrentInfos = provider.getAvailableConcurrentCameraInfos()
+            Log.i(TAG, "Concurrent pairs reported by HAL: ${concurrentInfos.size}")
 
-            provider.bindToLifecycle(lifecycleOwner, selectorForId(rearId), rearPreview)
-            Log.i(TAG, "REAR  bound ✅ (id=$rearId)")
+            var backSelector:  CameraSelector? = null
+            var frontSelector: CameraSelector? = null
 
-            // ── Front camera ─────────────────────────────────────────────────
-            // Explicit ID selector — does NOT replace the rear session above.
-            val frontPreview = Preview.Builder()
-                .setResolutionSelector(resolutionSelector(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT))
-                .build()
-                .also { it.setSurfaceProvider(frontPreviewView.surfaceProvider) }
-
-            try {
-                provider.bindToLifecycle(lifecycleOwner, selectorForId(frontId), frontPreview)
-                Log.i(TAG, "FRONT bound ✅ (id=$frontId)")
-            } catch (e: Exception) {
-                Log.w(TAG, "FRONT bind failed — device may not support concurrent preview: ${e.message}")
+            outer@ for (pair in concurrentInfos) {
+                var b: CameraSelector? = null
+                var f: CameraSelector? = null
+                for (info in pair) {
+                    when (info.lensFacing) {
+                        CameraSelector.LENS_FACING_BACK  -> b = info.cameraSelector
+                        CameraSelector.LENS_FACING_FRONT -> f = info.cameraSelector
+                    }
+                }
+                if (b != null && f != null) { backSelector = b; frontSelector = f; break@outer }
             }
 
-            _state.value = CameraState.Previewing
-            Log.i(TAG, "Dual preview running ✅")
+            if (backSelector == null || frontSelector == null) {
+                // ── Step 2: Xiaomi HAL fix — force DEFAULT selectors ───────────
+                // Xiaomi devices return empty concurrent list but CAN physically run
+                // both cameras.  bindToLifecycle(List<SingleCameraConfig>) often works
+                // anyway.  We set the flags and attempt; catch covers failure.
+                Log.w(TAG, "HAL reported no concurrent pairs (common Xiaomi bug) — forcing DEFAULT selectors")
+                backSelector  = CameraSelector.DEFAULT_BACK_CAMERA
+                frontSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+            }
+
+            bindDualCameras(provider, lifecycleOwner, backSelector, frontSelector,
+                            rearPreviewView, frontPreviewView)
 
         } catch (e: Exception) {
             Log.e(TAG, "startPreview failed: ${e.message}", e)
             _state.value = CameraState.Error(e.message ?: "Preview failed")
             throw e
+        }
+    }
+
+
+    private fun bindDualCameras(
+        provider       : ProcessCameraProvider,
+        lifecycleOwner : LifecycleOwner,
+        backSelector   : CameraSelector,
+        frontSelector  : CameraSelector,
+        rearView       : PreviewView,
+        frontView      : PreviewView
+    ) {
+        // Concurrent mode max resolution is 720p per stream
+        val rearPreview = Preview.Builder()
+            .setResolutionSelector(resolutionSelector(1280, 720))
+            .build().also { it.setSurfaceProvider(rearView.surfaceProvider) }
+
+        val frontPreview = Preview.Builder()
+            .setResolutionSelector(resolutionSelector(
+                AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT))
+            .build().also { it.setSurfaceProvider(frontView.surfaceProvider) }
+
+        try {
+            val primary = ConcurrentCamera.SingleCameraConfig(
+                backSelector,
+                UseCaseGroup.Builder().addUseCase(rearPreview).build(),
+                lifecycleOwner
+            )
+            val secondary = ConcurrentCamera.SingleCameraConfig(
+                frontSelector,
+                UseCaseGroup.Builder().addUseCase(frontPreview).build(),
+                lifecycleOwner
+            )
+            provider.bindToLifecycle(listOf(primary, secondary))
+            Log.i(TAG, "Dual concurrent bind SUCCESS")
+            _state.value = CameraState.Previewing
+
+        } catch (e: Exception) {
+            // ── Step 3: Hardware truly cannot run both at once ─────────────────
+            Log.e(TAG, "Dual bind failed (${e.message}) — rear-only fallback")
+            provider.unbindAll()
+            val rearOnly = Preview.Builder()
+                .setResolutionSelector(resolutionSelector(
+                    AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
+                .build().also { it.setSurfaceProvider(rearView.surfaceProvider) }
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, rearOnly)
+            Log.w(TAG, "REAR-only mode active — front camera not available on this device")
+            _state.value = CameraState.Previewing
         }
     }
 
@@ -199,8 +231,8 @@ class DVRCameraManager(private val context: Context) {
     fun validateCameraIds(prevRearId: String?, prevFrontId: String?): Boolean {
         val rm = prevRearId  == null || prevRearId  == rearCameraInfo?.logicalId
         val fm = prevFrontId == null || prevFrontId == frontCameraInfo?.logicalId
-        if (!rm) Log.w(TAG, "REAR ID changed: $prevRearId → ${rearCameraInfo?.logicalId}")
-        if (!fm) Log.w(TAG, "FRONT ID changed: $prevFrontId → ${frontCameraInfo?.logicalId}")
+        if (!rm) Log.w(TAG, "REAR ID changed: $prevRearId -> ${rearCameraInfo?.logicalId}")
+        if (!fm) Log.w(TAG, "FRONT ID changed: $prevFrontId -> ${frontCameraInfo?.logicalId}")
         return rm && fm
     }
 
@@ -214,6 +246,3 @@ class DVRCameraManager(private val context: Context) {
             }
         }
 }
-
-
-
