@@ -34,6 +34,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.io.File
 import com.dashcam.dvr.evidence.EvidencePackager
+import com.dashcam.dvr.camera.DVRCameraManager
+import com.dashcam.dvr.camera.FrontCameraRecorder
+import com.dashcam.dvr.loop.LoopRecorder
 
 /**
  * RecordingService — Foreground Service
@@ -105,6 +108,10 @@ class RecordingService : LifecycleService() {
     private lateinit var collisionDetector: CollisionDetector
     private var eventsLog: EventsLog? = null
     private var currentSessionDir: File? = null
+    // -- Module 7 fields --
+    private var loopRecorder:  LoopRecorder? = null
+    var dvrCamera:   DVRCameraManager?   = null
+    var frontCamera: FrontCameraRecorder? = null
 
     // ── Companion ──────────────────────────────────────────────────────────
     companion object {
@@ -277,8 +284,22 @@ class RecordingService : LifecycleService() {
                     }   //  ManeuverContext GPS+gyro fusion (Module 5)
                 )
 
-                // ── Module 2 placeholder ─────────────────────────────────────────────────
-                // cameraManager.start(sessionDir)   wired in Module 2
+                // Module 7: start loop recorder
+                // Cameras are injected by MainActivity.onServiceConnected(); on OS-restart
+                // recovery the service may start before the Activity rebinds.  Retry once
+                // after a short delay to cover that race without blocking the recording start.
+                loopRecorder = LoopRecorder(this@RecordingService).also { lr ->
+                    var dvr   = dvrCamera
+                    var front = frontCamera
+                    if (dvr == null || front == null) {
+                        Log.w(TAG, "LoopRecorder: cameras not injected yet — waiting 1s")
+                        kotlinx.coroutines.delay(1000L)
+                        dvr   = dvrCamera
+                        front = frontCamera
+                    }
+                    if (dvr != null && front != null) lr.start(sessionDir, dvr, front)
+                    else Log.w(TAG, "LoopRecorder: cameras not ready after retry — loop skipped")
+                }
 
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                     _state.value = ServiceState.Recording
@@ -319,8 +340,9 @@ class RecordingService : LifecycleService() {
 
 
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            // ── Module 2 placeholder ──────────────────────────────────────────────────
-            // cameraManager.stop()    wired in Module 2
+            // Module 7: stop loop recorder
+            loopRecorder?.stop()
+            loopRecorder = null
 
             // ── Module 3: flush and close telemetry.log ───────────────────────────────
             telemetryEngine.stop()
@@ -372,8 +394,8 @@ class RecordingService : LifecycleService() {
     }
 
     private fun handleManualEvent() {
-        Log.i(TAG, "Manual event triggered — segment protection queued (Module 7)")
-        // Module 7 (LoopRecorder) will protect current segment here
+        Log.i(TAG, "Manual event triggered")
+        loopRecorder?.protectCurrentSegment("MANUAL")
     }
 
     // ── createSessionDirStub() removed — Module 4 SessionManager owns session directory creation ──

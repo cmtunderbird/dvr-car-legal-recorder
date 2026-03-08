@@ -205,6 +205,48 @@ class DVRCameraManager(private val context: Context) {
         }
     }
 
+    /**
+     * Start recording to an arbitrary output file (for LoopRecorder segment files).
+     * Identical to startVideoRecording() but writes to [outputFile] directly instead
+     * of using the hardcoded rear_camera.mp4 filename inside sessionDir.
+     *
+     * Module 7 (LoopRecorder) calls this to write numbered segment files:
+     *   segments/seg_0001_rear.mp4, segments/seg_0002_rear.mp4, ...
+     */
+    @SuppressLint("MissingPermission")
+    fun startVideoRecordingToFile(outputFile: File): Boolean {
+        if (_state.value == CameraState.Recording) {
+            Log.w(TAG, "startVideoRecordingToFile: already recording")
+            return false
+        }
+        val vc = rearVideoCapture ?: run {
+            Log.e(TAG, "startVideoRecordingToFile: rearVideoCapture null")
+            return false
+        }
+        outputFile.parentFile?.mkdirs()
+        return try {
+            activeRearRecording = vc.output
+                .prepareRecording(context, FileOutputOptions.Builder(outputFile).build())
+                .start(ContextCompat.getMainExecutor(context)) { event ->
+                    when (event) {
+                        is VideoRecordEvent.Start    ->
+                            Log.i(TAG, "Rear REC started -> ${outputFile.name}")
+                        is VideoRecordEvent.Finalize ->
+                            if (event.hasError())
+                                Log.e(TAG, "Rear REC error ${event.error}: ${event.cause?.message}")
+                            else
+                                Log.i(TAG, "Rear saved: ${outputFile.name} (${outputFile.length() / 1024} KB)")
+                        else -> {}
+                    }
+                }
+            _state.value = CameraState.Recording
+            Log.i(TAG, "Rear recording -> ${outputFile.absolutePath}")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "startVideoRecordingToFile failed: ${e.message}", e)
+            false
+        }
+    }
     fun stopVideoRecording() {
         activeRearRecording?.stop()
         activeRearRecording = null

@@ -54,6 +54,9 @@ class MainActivity : AppCompatActivity() {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             val svc = (binder as RecordingService.RecordingBinder).getService()
             recordingService = svc
+            // Module 7: inject camera references so LoopRecorder can drive them
+            svc.dvrCamera   = cameraManager
+            svc.frontCamera = frontRecorder
             serviceBound = true
             // Reset orphaned Recording state (HyperOS keeps service alive after app kill)
             val isOrphaned = (svc.state.value is RecordingService.ServiceState.Recording ||
@@ -144,8 +147,8 @@ class MainActivity : AppCompatActivity() {
             }
             if (svc.state.value is RecordingService.ServiceState.Recording) {
                 // ── STOP ───────────────────────────────────────────────
-                cameraManager.stopVideoRecording()
-                frontRecorder.stopRecording()
+                // Module 7: LoopRecorder.stop() finalises last segment (called from RecordingService)
+                // frontRecorder stop owned by LoopRecorder
                 currentSessionDir?.let { Log.i(TAG, "Session closed: ${it.absolutePath}") }
                 currentSessionDir = null
                 svc.stopRecording()
@@ -154,18 +157,8 @@ class MainActivity : AppCompatActivity() {
                 // Module 4: SessionManager owns session dir — get it from the service Binder
                 // so cameras and telemetry land in the exact same folder.
                 val sessionDir = svc.prepareSessionDir().also { currentSessionDir = it }
-                val rearOk = cameraManager.startVideoRecording(sessionDir)
-                if (rearOk) {
-                    val frontFile = File(sessionDir, AppConstants.FRONT_VIDEO_FILENAME)
-                    val frontOk = frontRecorder.startRecording(frontFile)
-                    Log.i(TAG, "frontRecorder.startRecording=$frontOk")
-                    svc.startRecording(sessionDir.absolutePath)
-                } else {
-                    sessionDir.delete(); currentSessionDir = null
-                    Toast.makeText(this,
-                        "Cameras still initialising — try again in a moment",
-                        Toast.LENGTH_SHORT).show()
-                }
+                // Module 7: LoopRecorder (inside RecordingService) owns camera start/stop
+                svc.startRecording(sessionDir.absolutePath)
             }
         }
         btnEvent.setOnClickListener {
