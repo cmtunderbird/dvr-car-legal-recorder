@@ -20,26 +20,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-/**
- * RecordingService
- *
- * HYPEROS MINIMIZE FIX — ROOT CAUSE + SOLUTION:
- *
- * ROOT CAUSE:
- *   startForegroundService() called from Activity.onStart() creates an infinite loop:
- *   onStart() → startForegroundService() → HyperOS privacy banner → app minimizes
- *   → onStop() → user returns → onStart() AGAIN → banner AGAIN → loop forever.
- *
- * SOLUTION — Service self-starts:
- *   1. Activity calls bindService(BIND_AUTO_CREATE) ONLY — no startForegroundService()
- *   2. Service.onCreate() calls startService(self) to become a "started" service,
- *      then immediately calls startForeground() with LOCATION type only.
- *   3. LOCATION type shows only a small GPS dot in the status bar —
- *      NO full-screen privacy overlay, NO focus steal, NO minimize.
- *   4. CAMERA and MICROPHONE types are NOT declared — camera is owned by the
- *      Activity/CameraX, microphone will be used via MediaRecorder later.
- *      Both types trigger HyperOS's aggressive full-screen security overlay.
- */
 class RecordingService : LifecycleService() {
 
     inner class RecordingBinder : Binder() {
@@ -76,20 +56,12 @@ class RecordingService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        // Self-start: make this a "started" service so startForeground() is valid on API 34.
-        // This is safe — we're called from BIND_AUTO_CREATE which runs while the Activity
-        // is in the foreground. No startForegroundService() from Activity needed.
         startService(Intent(applicationContext, RecordingService::class.java))
-
-        // Promote to foreground with LOCATION type ONLY.
-        // LOCATION = small GPS dot in status bar. No overlay. No minimize. No banner.
-        // CAMERA and MICROPHONE types cause HyperOS's full-screen privacy overlay which
-        // steals window focus and sends the app to background.
         ServiceCompat.startForeground(
             this, NOTIFICATION_ID, buildNotification("DVR Ready"),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         )
-        Log.i(TAG, "Service onCreate — foreground with LOCATION type only")
+        Log.i(TAG, "Service created")
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -107,6 +79,19 @@ class RecordingService : LifecycleService() {
         return START_NOT_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // App swiped from recents — reset so next launch starts clean.
+        // Without this the service survives with Recording state; next Activity bind
+        // fires the observer immediately before cameras initialise → "camera not ready".
+        Log.i(TAG, "onTaskRemoved — resetting to Idle")
+        timerJob?.cancel(); timerJob = null
+        releaseWakeLock()
+        _state.value = ServiceState.Idle
+        _elapsedSeconds.value = 0L
+        updateNotification("DVR Ready")
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         releaseWakeLock()
         timerJob?.cancel()
@@ -114,7 +99,7 @@ class RecordingService : LifecycleService() {
         Log.i(TAG, "Service destroyed")
     }
 
-    // ── Public API (called via binder) ────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────
 
     fun startRecording() {
         if (_state.value is ServiceState.Recording || _state.value is ServiceState.Starting) return
@@ -127,7 +112,6 @@ class RecordingService : LifecycleService() {
             _state.value = ServiceState.Recording
             updateNotification("REC | 00:00:00")
             startTimer()
-            Log.i(TAG, "Recording active")
         }
     }
 
@@ -136,20 +120,17 @@ class RecordingService : LifecycleService() {
         Log.i(TAG, "stopRecording()")
         _state.value = ServiceState.Stopping
         lifecycleScope.launch {
-            timerJob?.cancel()
-            timerJob = null
+            timerJob?.cancel(); timerJob = null
             _elapsedSeconds.value = 0L
             releaseWakeLock()
             _state.value = ServiceState.Idle
             updateNotification("DVR Ready")
-            Log.i(TAG, "Recording stopped")
         }
     }
 
     fun triggerEvent() {
         if (_state.value !is ServiceState.Recording) return
         lifecycleScope.launch { updateNotification("REC | Event saved!") }
-        Log.i(TAG, "Event triggered")
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
