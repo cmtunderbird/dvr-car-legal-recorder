@@ -1,6 +1,7 @@
 package com.dashcam.dvr.service
 
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Binder
@@ -23,15 +24,18 @@ import kotlinx.coroutines.launch
 /**
  * RecordingService
  *
- * KEY FIX — Android 14 (targetSdk 34) requires ServiceCompat.startForeground() with
- * explicit service type flags.  The old 2-arg startForeground() throws
- * MissingForegroundServiceTypeException silently: service never reaches foreground,
- * HyperOS kills it immediately → app minimizes, timer never starts.
+ * HyperOS MINIMIZE FIX — DEFINITIVE:
+ * ServiceCompat.startForeground() with CAMERA|MICROPHONE type triggers HyperOS's
+ * privacy security overlay on the FIRST call, regardless of where it's called from.
+ * This overlay steals window focus → app minimizes.
+ *
+ * Fix: Call startForeground() in onCreate() — the banner fires ONCE during app startup
+ * while the Activity is already coming to foreground (safe), never again on button press.
+ * startRecording() only updates the notification text; no second startForeground() call.
  *
  * ARCHITECTURE: Binder-only control.
- * Activity binds with BIND_AUTO_CREATE and calls startRecording()/stopRecording()
- * directly on the binder instance.  The service promotes itself to foreground
- * internally — the Activity NEVER calls startForegroundService().
+ * Activity binds with BIND_AUTO_CREATE. Button calls startRecording()/stopRecording()
+ * directly on the service instance. Activity NEVER calls startForegroundService().
  */
 class RecordingService : LifecycleService() {
 
@@ -65,9 +69,23 @@ class RecordingService : LifecycleService() {
         private const val TAG            = "RecordingService"
     }
 
+
+    // ── Lifecycle ──────────────────────────────────────────────────────────
+
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "Service created")
+        // *** HYPEROS FIX ***
+        // Call startForeground() HERE — at service creation time — not in startRecording().
+        // The privacy banner fires ONCE during app startup while Activity is already
+        // transitioning to foreground. By the time user taps Record, the service is
+        // already a foreground service → no new banner → no minimize.
+        ServiceCompat.startForeground(
+            this, NOTIFICATION_ID, buildNotification("DVR Standby"),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        )
+        Log.i(TAG, "Service created and promoted to foreground (standby)")
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -100,25 +118,13 @@ class RecordingService : LifecycleService() {
         Log.i(TAG, "startRecording() called via binder")
         _state.value = ServiceState.Starting
         acquireWakeLock()
-
-        // *** THE CRITICAL FIX ***
-        // Android 14 (targetSdk=34): startForeground() without a service type throws
-        // MissingForegroundServiceTypeException — service silently fails to go foreground,
-        // HyperOS kills it → app minimizes, timer never starts.
-        // ServiceCompat.startForeground() handles the type flags and API level automatically.
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification("Starting..."),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-        )
-
+        // NO startForeground() call here — service is already foreground since onCreate().
+        // updateNotification() is all we need; no banner, no focus steal, no minimize.
+        updateNotification("REC | Starting...")
         lifecycleScope.launch {
             _elapsedSeconds.value = 0L
             _state.value = ServiceState.Recording
-            updateNotification("REC  |  00:00:00")
+            updateNotification("REC | 00:00:00")
             startTimer()
             Log.i(TAG, "Recording started")
         }
@@ -131,19 +137,20 @@ class RecordingService : LifecycleService() {
         lifecycleScope.launch {
             timerJob?.cancel()
             _elapsedSeconds.value = 0L
-            _state.value = ServiceState.Idle
             releaseWakeLock()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            Log.i(TAG, "Recording stopped")
+            _state.value = ServiceState.Idle
+            // Stay foreground in standby — don't stop the service
+            updateNotification("DVR Standby")
+            Log.i(TAG, "Recording stopped — back to standby")
         }
     }
 
     fun triggerEvent() {
         if (_state.value !is ServiceState.Recording) return
         Log.i(TAG, "Manual event triggered")
-        lifecycleScope.launch { updateNotification("REC  |  Event saved") }
+        lifecycleScope.launch { updateNotification("REC | Event saved") }
     }
+
 
     // ── Private helpers ───────────────────────────────────────────────────
 
@@ -153,7 +160,7 @@ class RecordingService : LifecycleService() {
                 delay(1_000)
                 _elapsedSeconds.value += 1
                 val s = _elapsedSeconds.value
-                updateNotification("REC  |  %02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60))
+                updateNotification("REC | %02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60))
             }
         }
     }

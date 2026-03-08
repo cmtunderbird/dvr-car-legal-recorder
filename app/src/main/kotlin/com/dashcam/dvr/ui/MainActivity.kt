@@ -28,16 +28,20 @@ import kotlinx.coroutines.launch
 /**
  * MainActivity
  *
- * IMPORTANT — service interaction via binder only:
- * Button taps call recordingService?.startRecording() / stopRecording() directly.
- * We NEVER call startForegroundService() from here — that triggers HyperOS camera
- * security banners which steal focus and minimize the app.
+ * SERVICE STARTUP — startForegroundService() + bindService() in onStart():
  *
- * IMPORTANT — unbind policy:
- * onStop() does NOT unbind while recording is active. Unbinding kills the
- * ServiceConnection, sets recordingService = null, and cancels all Flow collectors
- * — making the timer stop and the button state freeze.
- * We only unbind when the service is idle (not recording).
+ * Android 14 requires a service to be properly *started* (via startForegroundService)
+ * before startForeground() is valid. BIND_AUTO_CREATE alone creates the service but
+ * doesn't satisfy this requirement — startForeground() silently fails or throws.
+ *
+ * Fix: call startForegroundService() in onStart() so the service is both started
+ * AND bound. The HyperOS privacy banner fires ONCE at app launch while you're
+ * already looking at the screen — safe. Button press is a pure binder call — no
+ * system events, no banner, no minimize.
+ *
+ * onStop() UNBIND GUARD — covers Starting + Stopping too:
+ * If any system event (banner, screen-off) triggers onStop() while state is
+ * transitioning, we must NOT unbind or the service dies mid-start.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -56,6 +60,7 @@ class MainActivity : AppCompatActivity() {
 
     private var recordingService: RecordingService? = null
     private var serviceBound = false
+
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -78,7 +83,6 @@ class MainActivity : AppCompatActivity() {
         else Toast.makeText(this, "Camera and location permissions are required", Toast.LENGTH_LONG).show()
     }
 
-
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,20 +98,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        // Always (re)bind — safe to call even if already bound; guards against the
-        // case where user returns to app after service was kept alive during recording
+        // 1. startForegroundService() — satisfies Android 14's requirement that the service
+        //    be *started* before startForeground() is valid. The HyperOS privacy banner
+        //    fires here, at app startup, not on button press.
+        // 2. bindService() — gets us the binder for direct method calls.
+        // Both calls are safe to repeat if service is already running.
+        val svcIntent = Intent(this, RecordingService::class.java)
+        startForegroundService(svcIntent)
         if (!serviceBound) {
-            bindService(Intent(this, RecordingService::class.java), serviceConnection, BIND_AUTO_CREATE)
+            bindService(svcIntent, serviceConnection, BIND_AUTO_CREATE)
         }
     }
 
     override fun onStop() {
         super.onStop()
-        // KEY FIX: Only unbind when the service is idle.
-        // While recording, keep the binding alive so Flow collectors stay active
-        // and the timer keeps ticking when the user returns to the app.
-        val isRecording = recordingService?.state?.value is RecordingService.ServiceState.Recording
-        if (serviceBound && !isRecording) {
+        // Guard ALL active states — Starting and Stopping are transitional and must
+        // not be interrupted by an unbind (e.g. if HyperOS briefly backgrounds us).
+        val state = recordingService?.state?.value
+        val isActive = state is RecordingService.ServiceState.Recording ||
+                       state is RecordingService.ServiceState.Starting  ||
+                       state is RecordingService.ServiceState.Stopping
+        if (serviceBound && !isActive) {
             unbindService(serviceConnection)
             serviceBound = false
         }
@@ -116,7 +127,6 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cameraManager.stopAll()
-        // Final cleanup — unbind if still bound (recording was stopped before destroy)
         if (serviceBound) {
             try { unbindService(serviceConnection) } catch (_: Exception) {}
             serviceBound = false
@@ -141,7 +151,6 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Service not ready — please wait", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            // Call directly on service instance via binder — never startForegroundService()
             if (svc.state.value is RecordingService.ServiceState.Recording)
                 svc.stopRecording()
             else
@@ -152,7 +161,6 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "⚡ Event saved!", Toast.LENGTH_SHORT).show()
         }
     }
-
 
     // ── Permissions ────────────────────────────────────────────────────────
 
