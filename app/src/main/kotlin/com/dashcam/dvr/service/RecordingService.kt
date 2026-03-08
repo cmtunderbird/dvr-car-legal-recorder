@@ -62,6 +62,7 @@ class RecordingService : LifecycleService() {
 
     companion object {
         // Only used by notification action PendingIntents — NOT by the Activity
+        const val ACTION_START_RECORDING = "com.dashcam.dvr.START_RECORDING"
         const val ACTION_STOP_RECORDING = "com.dashcam.dvr.STOP_RECORDING"
         const val ACTION_TRIGGER_EVENT  = "com.dashcam.dvr.TRIGGER_EVENT"
         private const val TAG           = "RecordingService"
@@ -83,8 +84,9 @@ class RecordingService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_STOP_RECORDING -> stopRecording()
-            ACTION_TRIGGER_EVENT  -> triggerEvent()
+            ACTION_START_RECORDING -> startRecording()
+            ACTION_STOP_RECORDING  -> stopRecording()
+            ACTION_TRIGGER_EVENT   -> triggerEvent()
         }
         return START_NOT_STICKY
     }
@@ -189,3 +191,5 @@ class RecordingService : LifecycleService() {
         this, 2, Intent(this, RecordingService::class.java).setAction(ACTION_TRIGGER_EVENT),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 }
+
+

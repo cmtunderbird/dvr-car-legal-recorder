@@ -39,7 +39,7 @@ import kotlin.coroutines.resumeWithException
  *
  * Both Preview instances use ResolutionSelector (deprecated setTargetResolution removed).
  */
-@OptIn(ExperimentalCamera2Interop::class)
+@SuppressLint("UnsafeOptInUsageError")
 class DVRCameraManager(private val context: Context) {
 
     companion object { private const val TAG = "DVRCameraManager" }
@@ -214,3 +214,6 @@ class DVRCameraManager(private val context: Context) {
             }
         }
 }
+
+
+
