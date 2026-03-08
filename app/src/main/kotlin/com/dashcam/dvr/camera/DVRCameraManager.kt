@@ -35,26 +35,11 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * DVRCameraManager — CameraX 1.4.x
+ * DVRCameraManager — CameraX, rear camera only.
  *
- * STRATEGY: Standard multi-camera bind (NOT concurrent camera API).
- *
- * The ConcurrentCamera API only supports Preview use cases — adding VideoCapture
- * to a concurrent UseCaseGroup throws an IllegalArgumentException. Attempting to
- * bind VideoCapture separately on top of an existing concurrent session also fails
- * because the two binding modes are mutually exclusive in CameraX.
- *
- * Instead: use standard bindToLifecycle() for each camera independently.
- * CameraX internally handles multi-camera allocation the same way the OS would.
- * Devices that support opening two cameras simultaneously (like the Redmi Note 14 Pro,
- * confirmed by working dual preview) handle this without the concurrent API's restrictions.
- *
- * Bind order:
- *   1. Rear: Preview + VideoCapture  (primary recording + display)
- *   2. Front: Preview only            (secondary display; audio shared via rear mic)
- *
- * If front bind fails → rear-only mode (rear still records normally).
- * If rear bind fails  → Error state (recording is impossible).
+ * Binds rear camera with Preview + VideoCapture in a single bindToLifecycle() call.
+ * Front camera is handled independently by FrontCameraRecorder (Camera2 + MediaRecorder),
+ * which opens its own CameraDevice session and does not conflict with this CameraX session.
  */
 @SuppressLint("UnsafeOptInUsageError")
 class DVRCameraManager(private val context: Context) {
@@ -97,13 +82,12 @@ class DVRCameraManager(private val context: Context) {
         }
     }
 
-    var rearCameraInfo:  CameraInfo? = null; private set
-    var frontCameraInfo: CameraInfo? = null; private set
+    var rearCameraInfo:   CameraInfo? = null; private set
+    var frontCameraInfo:  CameraInfo? = null; private set
 
-    private var sharedProvider:       ProcessCameraProvider? = null
-    private var rearVideoCapture:     VideoCapture<Recorder>? = null
-    private var activeRearRecording:  Recording? = null
-    var isDualCamera:                 Boolean = false; private set
+    private var sharedProvider:      ProcessCameraProvider? = null
+    private var rearVideoCapture:    VideoCapture<Recorder>? = null
+    private var activeRearRecording: Recording? = null
 
     // ── Camera enumeration ────────────────────────────────────────────────
 
@@ -130,7 +114,7 @@ class DVRCameraManager(private val context: Context) {
                                  .maxByOrNull { it.focalLengths?.maxOrNull() ?: 0f }
             frontCameraInfo = all.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
             Log.i(TAG, "REAR : $rearCameraInfo")
-            Log.i(TAG, "FRONT: $frontCameraInfo")
+            Log.i(TAG, "FRONT: $frontCameraInfo (handled by FrontCameraRecorder)")
             Pair(rearCameraInfo, frontCameraInfo)
         }
 
@@ -141,18 +125,11 @@ class DVRCameraManager(private val context: Context) {
                 ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
             .build()
 
-    private fun makeRecorder() = Recorder.Builder()
-        .setQualitySelector(QualitySelector.from(
-            Quality.HD,
-            FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)))
-        .build()
-
-    // ── startPreview: binds Preview + VideoCapture for rear, Preview for front ──
+    // ── startPreview: rear camera only (Preview + VideoCapture) ──────────
 
     suspend fun startPreview(
         lifecycleOwner   : LifecycleOwner,
-        rearPreviewView  : PreviewView,
-        frontPreviewView : PreviewView
+        rearPreviewView  : PreviewView
     ) {
         _state.value = CameraState.Initialising
         try {
@@ -161,13 +138,17 @@ class DVRCameraManager(private val context: Context) {
             sharedProvider = provider
             provider.unbindAll()
 
-            // ── Rear camera: Preview + VideoCapture (always) ───────────────
             val rearPreview = Preview.Builder()
                 .setResolutionSelector(resolutionSelector(
                     AppConstants.REAR_CAM_WIDTH, AppConstants.REAR_CAM_HEIGHT))
                 .build().also { it.setSurfaceProvider(rearPreviewView.surfaceProvider) }
 
-            val rearVc = VideoCapture.withOutput(makeRecorder())
+            val rearVc = VideoCapture.withOutput(
+                Recorder.Builder()
+                    .setQualitySelector(QualitySelector.from(
+                        Quality.HD,
+                        FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)))
+                    .build())
             rearVideoCapture = rearVc
 
             provider.bindToLifecycle(
@@ -177,26 +158,6 @@ class DVRCameraManager(private val context: Context) {
                 rearVc
             )
             Log.i(TAG, "Rear camera bound (Preview + VideoCapture)")
-
-            // ── Front camera: Preview only (best effort) ───────────────────
-            try {
-                val frontPreview = Preview.Builder()
-                    .setResolutionSelector(resolutionSelector(
-                        AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT))
-                    .build().also { it.setSurfaceProvider(frontPreviewView.surfaceProvider) }
-
-                provider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_FRONT_CAMERA,
-                    frontPreview
-                )
-                isDualCamera = true
-                Log.i(TAG, "Front camera bound (Preview) — dual mode active")
-            } catch (e: Exception) {
-                isDualCamera = false
-                Log.w(TAG, "Front camera bind failed (rear-only mode): ${e.message}")
-            }
-
             _state.value = CameraState.Previewing
 
         } catch (e: Exception) {
@@ -210,33 +171,20 @@ class DVRCameraManager(private val context: Context) {
 
     // ── Video recording ───────────────────────────────────────────────────
 
-    /**
-     * Start recording rear_camera.mp4 into [sessionDir].
-     *
-     * VideoCapture is already bound in startPreview() — no extra bind needed here.
-     * We simply call prepareRecording().start() on the existing Recorder output.
-     * Returns true if recording started, false if VideoCapture is not ready.
-     */
     @SuppressLint("MissingPermission")
     fun startVideoRecording(sessionDir: File): Boolean {
-        if (_state.value == CameraState.Recording) {
-            Log.w(TAG, "startVideoRecording: already recording")
-            return true
-        }
+        if (_state.value == CameraState.Recording) return true
         val vc = rearVideoCapture ?: run {
-            Log.e(TAG, "startVideoRecording: rearVideoCapture is null — startPreview not called or failed")
+            Log.e(TAG, "startVideoRecording: rearVideoCapture null — startPreview not called")
             return false
         }
-
         sessionDir.mkdirs()
         val rearFile = File(sessionDir, AppConstants.REAR_VIDEO_FILENAME)
-        val executor = ContextCompat.getMainExecutor(context)
-
-        try {
+        return try {
             activeRearRecording = vc.output
                 .prepareRecording(context, FileOutputOptions.Builder(rearFile).build())
                 .withAudioEnabled()
-                .start(executor) { event ->
+                .start(ContextCompat.getMainExecutor(context)) { event ->
                     when (event) {
                         is VideoRecordEvent.Start    ->
                             Log.i(TAG, "Rear REC started → ${rearFile.name}")
@@ -249,22 +197,19 @@ class DVRCameraManager(private val context: Context) {
                     }
                 }
             _state.value = CameraState.Recording
-            Log.i(TAG, "Recording started → ${sessionDir.absolutePath}")
-            return true
+            Log.i(TAG, "Rear recording → ${sessionDir.absolutePath}")
+            true
         } catch (e: Exception) {
             Log.e(TAG, "prepareRecording failed: ${e.message}", e)
-            return false
+            false
         }
     }
 
-    /** Stop the active recording. File finalises asynchronously — watch Logcat for KB size. */
     fun stopVideoRecording() {
         activeRearRecording?.stop()
         activeRearRecording = null
-        if (_state.value == CameraState.Recording) {
-            _state.value = CameraState.Previewing
-        }
-        Log.i(TAG, "Recording stopped")
+        if (_state.value == CameraState.Recording) _state.value = CameraState.Previewing
+        Log.i(TAG, "Rear recording stopped")
     }
 
     fun stopAll() {
@@ -272,7 +217,6 @@ class DVRCameraManager(private val context: Context) {
         sharedProvider?.unbindAll()
         sharedProvider = null
         rearVideoCapture = null
-        isDualCamera = false
         _state.value = CameraState.Idle
     }
 

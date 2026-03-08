@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
+import android.view.TextureView
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
@@ -20,6 +21,7 @@ import androidx.lifecycle.lifecycleScope
 import com.dashcam.dvr.R
 import com.dashcam.dvr.camera.CameraValidator
 import com.dashcam.dvr.camera.DVRCameraManager
+import com.dashcam.dvr.camera.FrontCameraRecorder
 import com.dashcam.dvr.service.RecordingService
 import com.dashcam.dvr.util.AppConstants
 import com.google.android.material.button.MaterialButton
@@ -34,42 +36,36 @@ class MainActivity : AppCompatActivity() {
 
     companion object { private const val TAG = "MainActivity" }
 
-    private lateinit var previewRear   : PreviewView
-    private lateinit var previewFront  : PreviewView
-    private lateinit var tvTimer       : TextView
-    private lateinit var tvGpsStatus   : TextView
-    private lateinit var tvCameraStatus: TextView
-    private lateinit var btnRecord     : MaterialButton
-    private lateinit var btnEvent      : MaterialButton
+    private lateinit var previewRear       : PreviewView
+    private lateinit var previewFront      : TextureView   // Camera2 needs TextureView
+    private lateinit var tvTimer           : TextView
+    private lateinit var tvGpsStatus       : TextView
+    private lateinit var tvCameraStatus    : TextView
+    private lateinit var btnRecord         : MaterialButton
+    private lateinit var btnEvent          : MaterialButton
 
-    private lateinit var cameraManager  : DVRCameraManager
-    private lateinit var cameraValidator: CameraValidator
+    private lateinit var cameraManager     : DVRCameraManager
+    private lateinit var frontRecorder     : FrontCameraRecorder
+    private lateinit var cameraValidator   : CameraValidator
 
-    private var recordingService      : RecordingService? = null
-    private var serviceBound          = false
-    private var currentSessionDir     : File? = null
-    private var stateObserversStarted = false
+    private var recordingService           : RecordingService? = null
+    private var serviceBound               = false
+    private var currentSessionDir          : File? = null
+    private var stateObserversStarted      = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             val svc = (binder as RecordingService.RecordingBinder).getService()
             recordingService = svc
             serviceBound = true
-
-            // ── Orphan guard ──────────────────────────────────────────────
-            // On HyperOS, the service process survives app kill/restart.
-            // If it's in Recording state but THIS Activity has no camera session,
-            // that state is orphaned (the old camera is gone). Reset immediately
-            // before observers start — otherwise the observer fires Recording and
-            // calls startVideoRecording() before cameras have initialised.
+            // Reset orphaned Recording state (HyperOS keeps service alive after app kill)
             val isOrphaned = (svc.state.value is RecordingService.ServiceState.Recording ||
                               svc.state.value is RecordingService.ServiceState.Starting) &&
                              currentSessionDir == null
             if (isOrphaned) {
-                Log.w(TAG, "Orphaned Recording state detected on bind — resetting to Idle")
+                Log.w(TAG, "Orphaned state on bind — resetting")
                 svc.resetToIdle()
             }
-
             if (!stateObserversStarted) {
                 stateObserversStarted = true
                 observeServiceState()
@@ -77,8 +73,7 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "Bound to RecordingService (state=${svc.state.value})")
         }
         override fun onServiceDisconnected(name: ComponentName) {
-            recordingService = null
-            serviceBound = false
+            recordingService = null; serviceBound = false
             Log.w(TAG, "Service disconnected")
         }
     }
@@ -99,6 +94,7 @@ class MainActivity : AppCompatActivity() {
         bindViews()
         setupClickListeners()
         cameraManager   = DVRCameraManager(this)
+        frontRecorder   = FrontCameraRecorder(this)
         cameraValidator = CameraValidator(this)
         checkAndRequestPermissions()
     }
@@ -117,14 +113,14 @@ class MainActivity : AppCompatActivity() {
                        s is RecordingService.ServiceState.Starting  ||
                        s is RecordingService.ServiceState.Stopping
         if (serviceBound && !isActive) {
-            unbindService(serviceConnection)
-            serviceBound = false
+            unbindService(serviceConnection); serviceBound = false
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cameraManager.stopAll()
+        frontRecorder.close()
         if (serviceBound) {
             try { unbindService(serviceConnection) } catch (_: Exception) {}
             serviceBound = false
@@ -150,23 +146,27 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             if (svc.state.value is RecordingService.ServiceState.Recording) {
-                // STOP: camera first, then service
+                // ── STOP ───────────────────────────────────────────────
                 cameraManager.stopVideoRecording()
+                frontRecorder.stopRecording()
                 currentSessionDir?.let { Log.i(TAG, "Session closed: ${it.absolutePath}") }
                 currentSessionDir = null
                 svc.stopRecording()
             } else {
-                // START: camera first, then service (only if camera succeeds)
+                // ── START ──────────────────────────────────────────────
                 val sessionDir = createSessionDir().also { currentSessionDir = it }
-                val ok = cameraManager.startVideoRecording(sessionDir)
-                if (ok) {
+                val rearOk = cameraManager.startVideoRecording(sessionDir)
+                if (rearOk) {
+                    // Front recording — best effort, rear always wins
+                    val frontFile = File(sessionDir, AppConstants.FRONT_VIDEO_FILENAME)
+                    val frontOk = frontRecorder.startRecording(frontFile)
+                    Log.i(TAG, "frontRecorder.startRecording=$frontOk")
                     svc.startRecording()
-                    Log.i(TAG, "Recording → ${sessionDir.name}")
                 } else {
                     sessionDir.delete()
                     currentSessionDir = null
                     Toast.makeText(this,
-                        "Cameras still initialising — wait a moment and try again",
+                        "Cameras still initialising — try again in a moment",
                         Toast.LENGTH_SHORT).show()
                 }
             }
@@ -199,9 +199,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onPermissionsReady() {
-        Log.i(TAG, "All permissions granted")
+        Log.i(TAG, "All permissions granted — starting cameras")
         runCameraValidation()
-        startDualPreview()
+        startRearPreview()
+        frontRecorder.open(previewFront)   // Camera2 front — independent of CameraX
     }
 
     // ── Camera ────────────────────────────────────────────────────────────
@@ -215,15 +216,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startDualPreview() {
+    private fun startRearPreview() {
         lifecycleScope.launch {
             try {
-                tvCameraStatus.text = "Starting cameras..."
-                val (rear, front) = cameraManager.enumerateCameras()
-                cameraManager.startPreview(this@MainActivity, previewRear, previewFront)
-                tvCameraStatus.text = "R:${rear?.logicalId ?: "N/A"}  F:${front?.logicalId ?: "N/A"}"
+                tvCameraStatus.text = "Starting rear camera..."
+                val (rear, _) = cameraManager.enumerateCameras()
+                cameraManager.startPreview(this@MainActivity, previewRear)
+                tvCameraStatus.text = "REAR:${rear?.logicalId ?: "N/A"}"
             } catch (e: Exception) {
-                Log.e(TAG, "Camera start failed: ${e.message}", e)
+                Log.e(TAG, "Rear camera start failed: ${e.message}", e)
                 tvCameraStatus.text = "Camera error: ${e.message}"
             }
         }

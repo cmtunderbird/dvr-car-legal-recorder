@@ -6,7 +6,7 @@
     android:layout_height="match_parent"
     android:background="@color/dvr_bg">
 
-    <!-- ── Rear camera preview (left 72%) ───────────────────────────── -->
+    <!-- Rear camera preview (left 72%) — CameraX PreviewView -->
     <androidx.camera.view.PreviewView
         android:id="@+id/previewRear"
         android:layout_width="0dp"
@@ -18,7 +18,6 @@
         app:layout_constraintWidth_percent="0.72"
         app:scaleType="fillCenter" />
 
-    <!-- Road-facing label overlay -->
     <TextView
         android:id="@+id/labelRear"
         android:layout_width="wrap_content"
@@ -35,7 +34,7 @@
         android:layout_marginStart="6dp"
         android:layout_marginTop="6dp" />
 
-    <!-- ── Right panel ───────────────────────────────────────────────── -->
+    <!-- Right panel -->
     <LinearLayout
         android:id="@+id/rightPanel"
         android:layout_width="0dp"
@@ -48,7 +47,6 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintWidth_percent="0.28">
 
-        <!-- Cabin label -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -58,15 +56,13 @@
             android:fontFamily="monospace"
             android:paddingBottom="2dp" />
 
-        <!-- Front / cabin camera preview -->
-        <androidx.camera.view.PreviewView
+        <!-- Front / cabin camera preview — TextureView for Camera2 -->
+        <TextureView
             android:id="@+id/previewFront"
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1"
-            app:scaleType="fillCenter" />
+            android:layout_weight="1" />
 
-        <!-- Camera status (IDs / validation result) -->
         <TextView
             android:id="@+id/tvCameraStatus"
             android:layout_width="match_parent"
@@ -78,7 +74,6 @@
             android:gravity="center"
             android:paddingVertical="3dp" />
 
-        <!-- Session timer -->
         <TextView
             android:id="@+id/tvTimer"
             android:layout_width="match_parent"
@@ -90,7 +85,6 @@
             android:gravity="center"
             android:paddingVertical="4dp" />
 
-        <!-- GPS status -->
         <TextView
             android:id="@+id/tvGpsStatus"
             android:layout_width="match_parent"
@@ -101,7 +95,6 @@
             android:gravity="center"
             android:paddingBottom="6dp" />
 
-        <!-- Record / Stop button -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnRecord"
             android:layout_width="match_parent"
@@ -111,7 +104,6 @@
             app:backgroundTint="@color/dvr_teal"
             android:layout_marginBottom="4dp" />
 
-        <!-- Manual event trigger -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnEvent"
             android:layout_width="match_parent"
