@@ -119,3 +119,51 @@ data class NtpRecord(
     @SerializedName("offset_ms")    val offsetMs:   Long,
     val server:                                      String
 )
+
+
+/**
+ * Road quality record — written every 5s OR on state change.
+ *
+ * state:          "SMOOTH" | "ROUGH" | "VERY_ROUGH"
+ * vertical_rms:   RMS of net vertical acceleration over last 2s window (m/s²)
+ * sample_window:  actual samples captured in that window (ms)
+ * state_changed:  true when this record was triggered by a state transition
+ *
+ * Used by CollisionDetector to raise thresholds on rough surfaces,
+ * eliminating pothole/speed-bump false positives.
+ */
+data class RoadQualityRecord(
+    val type: String = "ROAD_QUALITY",
+    @SerializedName("ts_mono_ns")       val tsMonoNs:       Long,
+    @SerializedName("ts_utc")           val tsUtc:          String,
+    val state:                                               String,
+    @SerializedName("vertical_rms_ms2") val verticalRmsMs2: Float,
+    @SerializedName("sample_window_ms") val sampleWindowMs: Long,
+    @SerializedName("state_changed")    val stateChanged:   Boolean
+)
+
+/**
+ * Collision / road-impact record — written for every detection outcome.
+ *
+ * direction:    "FRONT_IMPACT" | "REAR_IMPACT" | "LATERAL_LEFT" | "LATERAL_RIGHT" | "ROAD_IMPACT"
+ * peak_g:       highest total-g measured during the spike
+ * duration_ms:  how long the threshold was sustained (0 for suppressed road impacts)
+ * ax_g/ay_g/az_net_g: peak acceleration per axis in g (gravity removed from az)
+ * road_state:   road quality at time of detection
+ * confirmed:    true = duration gate passed → real custody event
+ * suppressed:   true = classified as road surface feature, NOT a custody event
+ */
+data class CollisionRecord(
+    val type: String = "COLLISION",
+    @SerializedName("ts_mono_ns")  val tsMonoNs:   Long,
+    @SerializedName("ts_utc")      val tsUtc:      String,
+    val direction:                                  String,
+    @SerializedName("peak_g")      val peakG:      Float,
+    @SerializedName("duration_ms") val durationMs: Long,
+    @SerializedName("ax_g")        val axG:        Float,
+    @SerializedName("ay_g")        val ayG:        Float,
+    @SerializedName("az_net_g")    val azNetG:     Float,
+    @SerializedName("road_state")  val roadState:  String,
+    val confirmed:                                  Boolean,
+    val suppressed:                                 Boolean
+)

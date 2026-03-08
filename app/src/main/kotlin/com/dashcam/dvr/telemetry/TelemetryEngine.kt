@@ -139,6 +139,14 @@ class TelemetryEngine(private val context: Context) {
      * GPS write callback is CLEARED but the GNSS hardware keeps running.
      * Call from any thread; cleanup runs on the IO scope.
      */
+    /**
+     * Write any telemetry record from Module 5 detectors to the current session writer.
+     * Safe to call at 100 Hz; no-op if engine not running.
+     */
+    fun writeTelemetry(record: Any) {
+        if (_running && ::writer.isInitialized) writer.write(record)
+    }
+
     fun stop() {
         if (!_running) { Log.w(TAG, "stop() called while not running — ignored"); return }
         _running = false

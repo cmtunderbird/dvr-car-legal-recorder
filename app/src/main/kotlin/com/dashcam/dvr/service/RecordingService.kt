@@ -19,6 +19,14 @@ import com.dashcam.dvr.ui.MainActivity
 import com.dashcam.dvr.util.AppConstants
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import com.dashcam.dvr.collision.CollisionDetector
+import com.dashcam.dvr.collision.EventsLog
+import com.dashcam.dvr.collision.RoadQualityMonitor
+import com.dashcam.dvr.collision.model.ImpactEvent
+import com.dashcam.dvr.telemetry.model.CollisionRecord
+import com.dashcam.dvr.telemetry.model.RoadQualityRecord
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -85,6 +93,12 @@ class RecordingService : LifecycleService() {
     private var gpsMonitorJob:    Job? = null
 
         // Current session dir - set by handleStartRecording(), cleared on stop
+        // ── Module 5: Collision + Road Quality ───────────────────────────────────
+    private val _collisionEvents = MutableSharedFlow<ImpactEvent>(extraBufferCapacity = 8)
+    val collisionEvents = _collisionEvents.asSharedFlow()
+    private lateinit var roadMonitor:       RoadQualityMonitor
+    private lateinit var collisionDetector: CollisionDetector
+    private var eventsLog: EventsLog? = null
     private var currentSessionDir: File? = null
 
     // ── Companion ──────────────────────────────────────────────────────────
@@ -224,6 +238,11 @@ class RecordingService : LifecycleService() {
                 val sessionDir = currentSessionDir!!
                 // sessionDir is non-null from this point — captured as val
 
+                // Module 5: open EventsLog + hook detector write callbacks
+                eventsLog = EventsLog(sessionDir)
+                roadMonitor.writeCallback       = { rec -> telemetryEngine.writeTelemetry(rec) }
+                collisionDetector.writeCallback = { rec -> telemetryEngine.writeTelemetry(rec) }
+
                 // ── Module 3: TelemetryEngine wires GPS write callback + starts IMU/Mag/Baro
                 // onNtpSynced fires ~2s later after NTP sync; SessionManager patches session.json
                 telemetryEngine.start(
@@ -240,8 +259,13 @@ class RecordingService : LifecycleService() {
                             sessionManager.patchFirstGpsFix(sessionDir, fixTs)
                         }
                     },
-                    onAccelFanOut = null,   // → CollisionDetector (Module 5)
-                    onGyroFanOut  = null    // → CollisionDetector (Module 5)
+                    onAccelFanOut = { rec ->
+                    roadMonitor.onAccelSample(rec)
+                    collisionDetector.onAccelSample(rec)
+                },   // → CollisionDetector (Module 5)
+                    onGyroFanOut  = { rec ->
+                    collisionDetector.onGyroSample(rec)
+                }    // → CollisionDetector (Module 5)
                 )
 
                 // ── Module 2 placeholder ─────────────────────────────────────────────────
@@ -260,7 +284,13 @@ class RecordingService : LifecycleService() {
                     _state.value = ServiceState.Error(e.message ?: "Unknown error")
                 }
                 telemetryEngine.stop()
-                // Module 4: close session record on startup failure
+                            // Module 5: detach write callbacks (detectors stay alive, just stop writing)
+            roadMonitor.writeCallback       = null
+            collisionDetector.writeCallback = null
+            roadMonitor.reset()
+            collisionDetector.reset()
+            eventsLog = null
+            // Module 4: close session record on startup failure
                 currentSessionDir?.let { sessionManager.closeSession(it, "CRASH") }
                 releaseWakeLock()
                 stopSelf()
@@ -284,6 +314,13 @@ class RecordingService : LifecycleService() {
             // ── Module 3: flush and close telemetry.log ───────────────────────────────
             telemetryEngine.stop()
 
+
+            // Module 5: detach write callbacks and reset detectors
+            roadMonitor.writeCallback       = null
+            collisionDetector.writeCallback = null
+            roadMonitor.reset()
+            collisionDetector.reset()
+            eventsLog = null
             // ── Module 4: close session — write end_ts, final custody.log entry ───────
             currentSessionDir?.let { dir ->
                 sessionManager.closeSession(dir, "USER_STOP")
@@ -350,6 +387,13 @@ class RecordingService : LifecycleService() {
     // live GNSS fix status at all times, not just during a recording session.
     private fun startGpsMonitorLoop() {
         gpsMonitorJob?.cancel()
+                // Module 5: create detectors — they subscribe to accel/gyro fan-out
+        roadMonitor       = RoadQualityMonitor(telemetryEngine.ntpManager)
+        collisionDetector = CollisionDetector(
+            ntpManager  = telemetryEngine.ntpManager,
+            roadMonitor = roadMonitor,
+            onEvent     = { event -> handleImpactEvent(event) }
+        )
         gpsMonitorJob = lifecycleScope.launch {
             while (true) {
                 _hasGpsFix.value = gpsCollector.hasValidFix
@@ -409,4 +453,20 @@ class RecordingService : LifecycleService() {
         Intent(this, RecordingService::class.java).setAction(ACTION_TRIGGER_EVENT),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
+
+    // ── Module 5: impact event handler ───────────────────────────────────────
+    private fun handleImpactEvent(event: ImpactEvent) {
+        Log.w(TAG, "Impact event: ${event.direction}  peakG=${event.peakG}g  road=${event.roadState}")
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                eventsLog?.append(event)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to write events.log: ${e.message}")
+            }
+            currentSessionDir?.let { dir ->
+                sessionManager.appendCustodyEvent(dir, event)
+            }
+            _collisionEvents.emit(event)
+        }
+    }
 }

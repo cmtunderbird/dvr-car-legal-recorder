@@ -1,5 +1,6 @@
 package com.dashcam.dvr.session
 
+import com.dashcam.dvr.collision.model.ImpactEvent
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
@@ -301,4 +302,25 @@ class SessionManager(private val context: Context) {
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
             .apply { timeZone = TimeZone.getTimeZone("UTC") }
             .format(Date())
+
+    /**
+     * Appends a confirmed impact event to custody.log.
+     * ROAD_IMPACT events (confirmed=false) are NOT written to custody —
+     * they appear in telemetry.log only.
+     */
+    fun appendCustodyEvent(sessionDir: File, event: ImpactEvent) {
+        if (!event.confirmed) return
+        try {
+            CustodyLog.append(
+                sessionDir       = sessionDir,
+                installationUuid = installationUuid,
+                action           = "IMPACT_EVENT",
+                sessionId        = sessionDir.name,
+                detail           = "${event.direction}  peak=${event.peakG}g  road=${event.roadState}",
+                result           = "RECORDED"
+            )
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "appendCustodyEvent failed: ${e.message}")
+        }
+    }
 }

@@ -42,11 +42,6 @@ object AppConstants {
     const val MAGNETO_SAMPLE_HZ = 10
     const val BARO_SAMPLE_HZ    = 5
 
-    // ── Collision Detection ────────────────────────────────────────────────
-    const val IMPACT_G_THRESHOLD = 3.0f       // |a| > 3g  (Blueprint §8)
-    const val IMPACT_DURATION_MS = 20L        // must sustain 20 ms
-    const val GRAVITY_MS2        = 9.80665f
-
     // ── GPS Quality ────────────────────────────────────────────────────────
     const val GPS_MIN_SATELLITES = 4
     const val GPS_MAX_HDOP       = 2.5f
@@ -67,7 +62,6 @@ object AppConstants {
     const val FRONT_VIDEO_FILENAME  = "front_camera.mp4"
     const val AUDIO_FILENAME        = "audio.aac"
     const val TELEMETRY_FILENAME    = "telemetry.log"
-    const val EVENTS_FILENAME       = "events.log"
     const val CALIBRATION_FILENAME  = "calibration.json"
     const val SESSION_META_FILENAME = "session.json"
     const val MANIFEST_FILENAME     = "manifest.json"
@@ -100,4 +94,30 @@ object AppConstants {
     // ── WakeLock ───────────────────────────────────────────────────────────
     /** Safety ceiling — 12 hours covers any realistic driving session (Blueprint §14) */
     const val MAX_SESSION_WAKELOCK_MS = 12 * 60 * 60 * 1000L
+
+    // ── Collision Detection — adaptive thresholds ─────────────────────────────
+    // Base threshold (Blueprint §8): 3g / 20ms
+    // Raised on rough road to suppress pothole/speed-bump false positives.
+    const val IMPACT_G_THRESHOLD    = 3.0f   // SMOOTH road: trigger ≥ 3.0g
+    const val IMPACT_G_ROUGH        = 3.5f   // ROUGH road:  trigger ≥ 3.5g
+    const val IMPACT_G_VERY_ROUGH   = 4.5f   // VERY_ROUGH:  trigger ≥ 4.5g
+
+    // Minimum horizontal fraction of total-g vector required for COLLISION
+    // (below this → vertical dominant → classified as ROAD_IMPACT, not collision)
+    const val IMPACT_MIN_HORIZ_FRAC   = 0.35f  // SMOOTH
+    const val IMPACT_MIN_HORIZ_ROUGH  = 0.45f  // ROUGH
+    const val IMPACT_MIN_HORIZ_V_ROUGH = 0.65f  // VERY_ROUGH
+
+    const val IMPACT_DURATION_MS   = 20L          // Blueprint §8: must sustain ≥ 20ms
+    const val IMPACT_COOLDOWN_MS   = 2_000L       // 2s dead-zone after confirmed collision
+    const val GRAVITY_MS2          = 9.80665f
+
+    // ── Road Quality Monitor ──────────────────────────────────────────────────
+    // RMS thresholds for vertical net acceleration (m/s²)
+    const val ROAD_ROUGH_RMS_MS2       = 1.5f   // > 1.5 m/s² RMS → ROUGH
+    const val ROAD_VERY_ROUGH_RMS_MS2  = 4.0f   // > 4.0 m/s² RMS → VERY_ROUGH
+    const val ROAD_QUALITY_LOG_INTERVAL_MS = 5_000L  // write record every 5s (or on state change)
+
+    // ── Events log ────────────────────────────────────────────────────────────
+    const val EVENTS_FILENAME = "events.log"
 }
