@@ -34,7 +34,7 @@
         android:layout_marginStart="6dp"
         android:layout_marginTop="6dp" />
 
-    <!-- Right panel -->
+    <!-- Right panel (28%) — vertical stack of controls -->
     <LinearLayout
         android:id="@+id/rightPanel"
         android:layout_width="0dp"
@@ -56,12 +56,27 @@
             android:fontFamily="monospace"
             android:paddingBottom="2dp" />
 
-        <!-- Front / cabin camera preview — TextureView for Camera2 -->
-        <TextureView
-            android:id="@+id/previewFront"
+        <!--
+            Front camera preview — TextureView locked to 16:9 landscape.
+            ConstraintLayout wrapper enforces the aspect ratio so the TextureView
+            is always wider than tall, matching the camera's native 16:9 frame.
+            The weight=0 wrapper takes only as much height as the 16:9 ratio needs.
+        -->
+        <androidx.constraintlayout.widget.ConstraintLayout
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1" />
+            android:layout_height="wrap_content">
+
+            <TextureView
+                android:id="@+id/previewFront"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                app:layout_constraintDimensionRatio="H,16:9"
+                app:layout_constraintTop_toTopOf="parent"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent" />
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
 
         <TextView
             android:id="@+id/tvCameraStatus"

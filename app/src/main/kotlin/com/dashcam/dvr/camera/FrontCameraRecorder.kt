@@ -3,6 +3,7 @@ package com.dashcam.dvr.camera
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Matrix
+import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
@@ -19,6 +20,7 @@ import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
+import android.view.WindowManager
 import com.dashcam.dvr.util.AppConstants
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,6 +50,7 @@ class FrontCameraRecorder(private val context: Context) {
     private var backgroundHandler: Handler?       = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // Camera native frame size: 1280×720 landscape (16:9)
     private val previewSize = Size(AppConstants.FRONT_CAM_WIDTH, AppConstants.FRONT_CAM_HEIGHT)
 
     fun open(textureView: TextureView) {
@@ -74,61 +77,63 @@ class FrontCameraRecorder(private val context: Context) {
     }
 
     /**
-     * Apply corrective rotation + fill-scale matrix to the TextureView.
+     * Camera2Basic-style configureTransform.
      *
-     * Camera2 buffers arrive in raw sensor coordinates; the OS does NOT rotate them.
-     * correctionDeg = (sensorOrientation - deviceDeg + 360) % 360
+     * Problem: TextureView silently stretches the raw sensor buffer (1280×720) to
+     * fill whatever view size it has.  We must apply a Matrix that undoes this stretch,
+     * then rotates so the image is upright, then scales back to fill the 16:9 window.
      *
-     * Redmi Note 14 Pro front sensor orientation = 270°.
-     * App is always landscape but the sensor reference is portrait (deviceDeg = 0).
-     *   correctionDeg = (270 - 0 + 360) % 360 = 270  → hits the 90/270 branch
-     *   postRotate(270°) = 90° CW  ✓
+     * The official Camera2Basic approach (used verbatim here):
+     *   1. setRectToRect( viewRect → swapped-buffer-rect )  — maps view ↔ buffer coords,
+     *      accounting for the 90°/270° dimension swap.
+     *   2. postScale to fill            — scaled so the shorter buffer axis fills the view.
+     *   3. postRotate by display angle  — rotates the corrected content upright.
      *
-     * deviceDeg = 0 (not 90) because on this device the TextureView coordinate
-     * space already accounts for the display orientation; we only need to correct
-     * for the sensor's own mounting angle relative to the natural device axis.
+     * For ROTATION_90 (landscape, display rotated 90° from natural):
+     *   postRotate( 90 × (1-2) ) = postRotate(-90°) = 270° CCW = 90° CW  ✓
+     *   This is consistent with the orientation fix confirmed on Redmi Note 14 Pro.
+     *
+     * The TextureView in the layout is constrained to 16:9 (H,16:9 dimensionRatio),
+     * so the view is always wider than tall — matching the camera's native 16:9 frame.
+     * The setRectToRect + scale fills it exactly with no black bars.
      */
+    @Suppress("DEPRECATION")
     private fun configureTransform(textureView: TextureView) {
         val vw = textureView.width.toFloat()
         val vh = textureView.height.toFloat()
         if (vw == 0f || vh == 0f) { textureView.post { configureTransform(textureView) }; return }
 
-        val sensorOrientation = try {
-            cameraManager.getCameraCharacteristics(cameraId!!)
-                .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 270
-        } catch (e: Exception) { 270 }
+        val displayRotation = (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+            .defaultDisplay.rotation   // ROTATION_0=0, ROTATION_90=1, ROTATION_270=3
 
-        Log.i(TAG, "Front transform: sensor=$sensorOrientation  view=${vw.toInt()}x${vh.toInt()}")
-
+        val bw = previewSize.width.toFloat()    // 1280
+        val bh = previewSize.height.toFloat()   // 720
         val cx = vw / 2f;  val cy = vh / 2f
-        val bw = previewSize.width.toFloat()   // 1280
-        val bh = previewSize.height.toFloat()  // 720
 
-        // deviceDeg = 0 → correctionDeg = 270 → 90° CW (confirmed on Redmi Note 14 Pro)
-        val deviceDeg = 0
-        val correctionDeg = ((sensorOrientation - deviceDeg) + 360) % 360
-        Log.i(TAG, "Front transform: correctionDeg=$correctionDeg")
+        Log.i(TAG, "Front transform: displayRotation=$displayRotation  view=${vw.toInt()}x${vh.toInt()}")
 
         val matrix = Matrix()
-        when (correctionDeg) {
-            90, 270 -> {
-                matrix.postRotate(correctionDeg.toFloat(), cx, cy)
-                // After 90°/270° rotation the effective dims swap: bh×bw
-                val scale = maxOf(vw / bh, vh / bw)
+        when (displayRotation) {
+            Surface.ROTATION_90, Surface.ROTATION_270 -> {
+                // Device is landscape — Camera2Basic setRectToRect approach.
+                // bufferRect uses swapped dims (bh×bw) because the sensor buffer will be
+                // rotated 90°/270° relative to the view coordinate space.
+                val bufferRect = RectF(0f, 0f, bh, bw)
+                bufferRect.offset(cx - bufferRect.centerX(), cy - bufferRect.centerY())
+                matrix.setRectToRect(RectF(0f, 0f, vw, vh), bufferRect, Matrix.ScaleToFit.FILL)
+                // Scale so the shorter axis fills the view (fill, no black bars)
+                val scale = maxOf(vh / bh, vw / bw)
                 matrix.postScale(scale, scale, cx, cy)
+                // Rotate to correct orientation (for ROTATION_90: -90° = 270° CW = 90° CW ✓)
+                matrix.postRotate(90f * (displayRotation - 2), cx, cy)
             }
-            180 -> {
+            Surface.ROTATION_180 -> {
                 matrix.postRotate(180f, cx, cy)
-                val scale = maxOf(vw / bw, vh / bh)
-                matrix.postScale(scale, scale, cx, cy)
             }
-            else -> {  // 0°
-                val scale = maxOf(vw / bw, vh / bh)
-                matrix.postScale(scale, scale, cx, cy)
-            }
+            // ROTATION_0 (portrait): no transform needed
         }
         textureView.setTransform(matrix)
-        Log.i(TAG, "Front transform applied")
+        Log.i(TAG, "Front transform applied: displayRotation=$displayRotation  postRotateDeg=${90*(displayRotation-2)}")
     }
 
     private fun openCamera(surfaceTexture: SurfaceTexture) {
