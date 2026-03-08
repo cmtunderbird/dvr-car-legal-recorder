@@ -73,6 +73,17 @@ object AppConstants {
     const val MANIFEST_FILENAME     = "manifest.json"
     const val SIGNATURE_FILENAME    = "signature"
     const val CUSTODY_LOG_FILENAME  = "custody.log"
+
+    // ── Addon v1.0 §A.5 — Navigation Integration session files ──────────────────
+    const val FILE_ROUTE_PLAN     = "route_plan.geojson"    // planned route polyline
+    const val FILE_ROUTE_ACTUAL   = "route_actual.geojson"  // actual GNSS track
+    const val FILE_NAV_EVENTS     = "navigation_events.log" // Waze alerts, re-routes, deviations
+    const val FILE_SPEED_LIMITS   = "speed_limits.log"      // speed limit per segment x actual speed
+    const val FILE_NAV_STATE      = "navigation_state.log"  // state machine transitions
+
+    // ── Addon v1.0 §B.8 — Driver Drowsiness Detection session files ─────────────
+    const val FILE_DROWSINESS     = "drowsiness.log"         // per-alert JSONL with all sensor readings
+    const val FILE_FATIGUE_SCORE  = "fatigue_score.json"     // 0-100 score sampled every 30s
     const val EXPORT_FILENAME_PREFIX = "case_export_"
 
     // ── Storage health ─────────────────────────────────────────────────────

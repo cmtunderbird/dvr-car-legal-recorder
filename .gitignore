@@ -1,6 +1,6 @@
-# Android build outputs
+﻿# ─── Android build outputs ──────────────────────────────────────────────────
 *.iml
-.gradle
+/.gradle/
 /local.properties
 /.idea/caches
 /.idea/libraries
@@ -14,16 +14,21 @@
 .externalNativeBuild
 .cxx
 local.properties
-
-# App build folder
 app/build/
 
-# Keystore files — NEVER commit these
+# ─── Keystore files — NEVER commit ─────────────────────────────────────────
 *.jks
 *.keystore
 
-# Google Services
+# ─── Google Services ────────────────────────────────────────────────────────
 google-services.json
 
-# Kotlin
+# ─── Kotlin module artifacts ────────────────────────────────────────────────
 *.kotlin_module
+
+# ─── Development scratch / patch files ─────────────────────────────────────
+_*.kt
+_*.xml
+_*.java
+build_out.txt
+journal.txt

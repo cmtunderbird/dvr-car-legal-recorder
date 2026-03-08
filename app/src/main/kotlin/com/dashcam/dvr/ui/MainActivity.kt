@@ -28,9 +28,6 @@ import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -153,18 +150,18 @@ class MainActivity : AppCompatActivity() {
                 currentSessionDir = null
                 svc.stopRecording()
             } else {
-                // ── START ──────────────────────────────────────────────
-                val sessionDir = createSessionDir().also { currentSessionDir = it }
+                // ── START ─────────────────────────────────────────────────────────────────
+                // Module 4: SessionManager owns session dir — get it from the service Binder
+                // so cameras and telemetry land in the exact same folder.
+                val sessionDir = svc.prepareSessionDir().also { currentSessionDir = it }
                 val rearOk = cameraManager.startVideoRecording(sessionDir)
                 if (rearOk) {
-                    // Front recording — best effort, rear always wins
                     val frontFile = File(sessionDir, AppConstants.FRONT_VIDEO_FILENAME)
                     val frontOk = frontRecorder.startRecording(frontFile)
                     Log.i(TAG, "frontRecorder.startRecording=$frontOk")
-                    svc.startRecording()
+                    svc.startRecording(sessionDir.absolutePath)
                 } else {
-                    sessionDir.delete()
-                    currentSessionDir = null
+                    sessionDir.delete(); currentSessionDir = null
                     Toast.makeText(this,
                         "Cameras still initialising — try again in a moment",
                         Toast.LENGTH_SHORT).show()
@@ -245,11 +242,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createSessionDir(): File {
-        val ts   = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val base = File(getExternalFilesDir(null), "DVR")
-        return File(base, "${AppConstants.SESSION_DIR_PREFIX}$ts").also { it.mkdirs() }
-    }
+    // createSessionDir() removed — Module 4: SessionManager owns session dir creation
 
     // ── Service observer — UI only ────────────────────────────────────────
 
@@ -281,6 +274,14 @@ class MainActivity : AppCompatActivity() {
             recordingService?.elapsedSeconds?.collectLatest { secs ->
                 tvTimer.text = "%02d:%02d:%02d"
                     .format(secs / 3600, (secs % 3600) / 60, secs % 60)
+            }
+        }
+        lifecycleScope.launch {
+            recordingService?.hasGpsFix?.collectLatest { hasFix ->
+                tvGpsStatus.text = if (hasFix) "\u2705 GPS Fixed" else "\uD83D\uDCE1 GPS Acquiring\u2026"
+                tvGpsStatus.setTextColor(
+                    ContextCompat.getColor(this@MainActivity,
+                        if (hasFix) R.color.dvr_teal else R.color.dvr_amber))
             }
         }
     }

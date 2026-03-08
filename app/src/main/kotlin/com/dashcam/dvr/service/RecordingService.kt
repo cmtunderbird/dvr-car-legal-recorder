@@ -13,6 +13,8 @@ import androidx.lifecycle.lifecycleScope
 import com.dashcam.dvr.DVRApplication.Companion.CHANNEL_RECORDING
 import com.dashcam.dvr.R
 import com.dashcam.dvr.telemetry.TelemetryEngine
+import com.dashcam.dvr.session.SessionManager
+import com.dashcam.dvr.telemetry.collectors.GpsCollector
 import com.dashcam.dvr.ui.MainActivity
 import com.dashcam.dvr.util.AppConstants
 import kotlinx.coroutines.Job
@@ -21,9 +23,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * RecordingService — Foreground Service
@@ -32,14 +31,14 @@ import java.util.Locale
  * ────────────────────────────────
  * Module 1:  Foreground Service skeleton — WakeLock, notifications, lifecycle
  * Module 3:  TelemetryEngine wired in — GPS + IMU + NTP started/stopped in sync
- * Module 4:  SessionManager will replace createSessionDirStub()
+ * Module 4:  SessionManager — session.json, custody.log, storage health, calibration
  * Module 5:  CollisionDetector fan-out hooks pre-plumbed via TelemetryEngine.start()
  *
  * NOTE — foregroundServiceType = "location" only (not camera/microphone).
  * Adding camera/microphone types triggers HyperOS full-screen privacy overlay
  * which steals window focus and minimises the app. Camera sessions are owned by
  * DVRCameraManager in MainActivity (CameraX lifecycle). Location is legitimate
- * for continuous GPS telemetry. See _manifest_service_patch.xml for context.
+ * for continuous GPS telemetry. See AndroidManifest.xml foregroundServiceType declaration.
  */
 class RecordingService : LifecycleService() {
 
@@ -64,9 +63,18 @@ class RecordingService : LifecycleService() {
     private val _elapsedSeconds = MutableStateFlow(0L)
     val elapsedSeconds: StateFlow<Long> = _elapsedSeconds
 
+    // GPS fix state — observed by MainActivity to update tvGpsStatus
+    private val _hasGpsFix = MutableStateFlow(false)
+    val hasGpsFix: StateFlow<Boolean> = _hasGpsFix
+
 
     // ── Module 3 ───────────────────────────────────────────────────────────
     private lateinit var telemetryEngine: TelemetryEngine
+    private lateinit var sessionManager:  SessionManager
+
+    // GPS collector — always-on, lifecycle: onCreate() → onDestroy()
+    // Independent of recording. TelemetryEngine just hooks/unhooks the write callback.
+    private lateinit var gpsCollector: GpsCollector
 
     // ── WakeLock ───────────────────────────────────────────────────────────
     private var wakeLock: PowerManager.WakeLock? = null
@@ -74,8 +82,9 @@ class RecordingService : LifecycleService() {
     // ── Jobs ───────────────────────────────────────────────────────────────
     private var timerJob:        Job? = null
     private var statusUpdateJob: Job? = null
+    private var gpsMonitorJob:    Job? = null
 
-    // ── Session dir (stub until Module 4 — SessionManager) ────────────────
+        // Current session dir - set by handleStartRecording(), cleared on stop
     private var currentSessionDir: File? = null
 
     // ── Companion ──────────────────────────────────────────────────────────
@@ -86,6 +95,7 @@ class RecordingService : LifecycleService() {
         const val ACTION_STOP_RECORDING  = "com.dashcam.dvr.STOP_RECORDING"
         const val ACTION_TRIGGER_EVENT   = "com.dashcam.dvr.TRIGGER_EVENT"
 
+        const val EXTRA_SESSION_DIR          = "com.dashcam.dvr.EXTRA_SESSION_DIR"
         private const val NOTIFICATION_ID  = 1001
         private const val STATUS_UPDATE_MS = 2_000L
     }
@@ -95,6 +105,10 @@ class RecordingService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         telemetryEngine = TelemetryEngine(applicationContext)
+        sessionManager  = SessionManager(applicationContext)
+        gpsCollector = GpsCollector(applicationContext, telemetryEngine.ntpManager)
+        gpsCollector.start()   // GNSS warm-up — always on regardless of recording
+        startGpsMonitorLoop()   // keeps _hasGpsFix live at all times
         Log.i(TAG, "RecordingService created")
     }
 
@@ -106,7 +120,7 @@ class RecordingService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_START_RECORDING -> handleStartRecording()
+            ACTION_START_RECORDING -> { handleStartRecording(intent); return START_NOT_STICKY }
             ACTION_STOP_RECORDING  -> handleStopRecording()
             ACTION_TRIGGER_EVENT   -> handleManualEvent()
         }
@@ -122,6 +136,7 @@ class RecordingService : LifecycleService() {
         releaseWakeLock()
         _state.value          = ServiceState.Idle
         _elapsedSeconds.value = 0L
+        // _hasGpsFix driven by gpsMonitorLoop — not reset on idle (GPS stays warm)
         updateNotification("DVR Ready")
         super.onTaskRemoved(rootIntent)
     }
@@ -133,15 +148,21 @@ class RecordingService : LifecycleService() {
             telemetryEngine.stop()
         }
         releaseWakeLock()
+        gpsMonitorJob?.cancel(); gpsMonitorJob = null
+        if (::gpsCollector.isInitialized) gpsCollector.stop()
         Log.i(TAG, "RecordingService destroyed")
     }
 
     // ── Instance methods called by MainActivity (via bound service) ────────
 
-    /** Called by MainActivity when user taps Record. */
-    fun startRecording() {
+        /** Pre-allocate the session dir for cameras, then pass path to startRecording(). */
+    fun prepareSessionDir(): File = sessionManager.prepareSessionDir()
+
+    /** Called by MainActivity when user taps Record. Pass the pre-allocated dir path. */
+    fun startRecording(sessionDirPath: String) {
         startService(Intent(this, RecordingService::class.java)
-            .setAction(ACTION_START_RECORDING))
+            .setAction(ACTION_START_RECORDING)
+            .putExtra(EXTRA_SESSION_DIR, sessionDirPath))
     }
 
     /** Called by MainActivity when user taps Stop. */
@@ -169,12 +190,13 @@ class RecordingService : LifecycleService() {
         releaseWakeLock()
         _state.value          = ServiceState.Idle
         _elapsedSeconds.value = 0L
+        // _hasGpsFix driven by gpsMonitorLoop — not reset on idle (GPS stays warm)
         updateNotification("DVR Ready")
     }
 
     // ── Internal start/stop handlers ───────────────────────────────────────
 
-    private fun handleStartRecording() {
+    private fun handleStartRecording(intent: Intent) {
         if (_state.value is ServiceState.Recording) {
             Log.w(TAG, "Already recording — ignoring start"); return
         }
@@ -182,31 +204,64 @@ class RecordingService : LifecycleService() {
         startForegroundNotification()
         acquireWakeLock()
 
-        lifecycleScope.launch {
-            try {
-                val sessionDir = createSessionDirStub()
-                currentSessionDir = sessionDir
 
-                // ── Module 3: start telemetry ──────────────────────────────
-                // onAccelFanOut / onGyroFanOut → CollisionDetector (Module 5)
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // ── Module 4: SessionManager opens the evidence session ─────────────────
+                // SessionManager is now the single authority for session directory creation.
+                // It runs storage health check, reads calibration.json, writes preliminary
+                // session.json, and initialises custody.log — all before recording begins.
+                // Use the pre-allocated dir from prepareSessionDir() if provided (normal start),
+                // or create a new one on OS-restart recovery (no intent extra).
+                val preallocatedDir = intent.getStringExtra(EXTRA_SESSION_DIR)
+                    ?.let { java.io.File(it) }
+                val sessionResult = sessionManager.startSession(
+                    gpsCollector    = gpsCollector,
+                    telemetryEngine = telemetryEngine,
+                    existingDir     = preallocatedDir   // null = OS restart, new dir created
+                )
+                currentSessionDir = sessionResult.sessionDir
+                val sessionDir = currentSessionDir!!
+                // sessionDir is non-null from this point — captured as val
+
+                // ── Module 3: TelemetryEngine wires GPS write callback + starts IMU/Mag/Baro
+                // onNtpSynced fires ~2s later after NTP sync; SessionManager patches session.json
                 telemetryEngine.start(
                     sessionDir    = sessionDir,
-                    onAccelFanOut = null,
-                    onGyroFanOut  = null
+                    gpsCollector  = gpsCollector,
+                    onNtpSynced   = { ntpRecord: com.dashcam.dvr.telemetry.model.NtpRecord ->
+                        sessionManager.patchNtpAndSensors(
+                            sessionDir,
+                            ntpRecord,
+                            telemetryEngine.barometerPresent
+                        )
+                        // If GPS fix arrived while NTP was syncing, capture it now
+                        gpsCollector.firstValidFixTs?.let { fixTs ->
+                            sessionManager.patchFirstGpsFix(sessionDir, fixTs)
+                        }
+                    },
+                    onAccelFanOut = null,   // → CollisionDetector (Module 5)
+                    onGyroFanOut  = null    // → CollisionDetector (Module 5)
                 )
 
-                // ── Module 2 placeholder ───────────────────────────────────
-                // cameraManager.start(sessionDir)  ← wired in Module 2
+                // ── Module 2 placeholder ─────────────────────────────────────────────────
+                // cameraManager.start(sessionDir)   wired in Module 2
 
-                _state.value = ServiceState.Recording
-                startTimerLoop()
-                startStatusUpdateLoop()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    _state.value = ServiceState.Recording
+                    startTimerLoop()
+                    startStatusUpdateLoop()
+                }
                 Log.i(TAG, "Recording started — session: ${sessionDir.name}")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start recording: ${e.message}")
-                _state.value = ServiceState.Error(e.message ?: "Unknown error")
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    _state.value = ServiceState.Error(e.message ?: "Unknown error")
+                }
                 telemetryEngine.stop()
+                // Module 4: close session record on startup failure
+                currentSessionDir?.let { sessionManager.closeSession(it, "CRASH") }
                 releaseWakeLock()
                 stopSelf()
             }
@@ -221,30 +276,39 @@ class RecordingService : LifecycleService() {
         timerJob?.cancel(); timerJob = null
         statusUpdateJob?.cancel(); statusUpdateJob = null
 
-        lifecycleScope.launch {
-            // ── Module 2 placeholder ───────────────────────────────────────
-            // cameraManager.stop()
 
-            // ── Module 3: flush and close telemetry.log ────────────────────
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // ── Module 2 placeholder ──────────────────────────────────────────────────
+            // cameraManager.stop()    wired in Module 2
+
+            // ── Module 3: flush and close telemetry.log ───────────────────────────────
             telemetryEngine.stop()
 
-            // ── Module 6 placeholder ───────────────────────────────────────
-            // evidencePackager.seal(currentSessionDir)
+            // ── Module 4: close session — write end_ts, final custody.log entry ───────
+            currentSessionDir?.let { dir ->
+                sessionManager.closeSession(dir, "USER_STOP")
+            }
+
+            // ── Module 6 placeholder ──────────────────────────────────────────────────
+            // evidencePackager.seal(currentSessionDir)   wired in Module 6
 
             if (telemetryEngine.ntpSyncStatus != "SYNCED")
                 Log.w(TAG, "Session CLOCK_UNVERIFIED — ${telemetryEngine.ntpSyncStatus}")
 
-            Log.i(TAG, "Session ended — " +
-                "first_fix=${telemetryEngine.firstValidFixTs ?: "NONE"}  " +
+            Log.i(TAG, "Session closed — " +
+                "session=${currentSessionDir?.name ?: "?"}  " +
+                "first_fix=${gpsCollector.firstValidFixTs ?: "NONE"}  " +
                 "ntp=${telemetryEngine.ntpSyncStatus}  " +
                 "offset=${telemetryEngine.ntpOffsetMs}ms"
             )
 
-            _elapsedSeconds.value = 0L
-            releaseWakeLock()
-            _state.value = ServiceState.Idle
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                _elapsedSeconds.value = 0L
+                releaseWakeLock()
+                _state.value = ServiceState.Idle
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
     }
 
@@ -253,16 +317,7 @@ class RecordingService : LifecycleService() {
         // Module 7 (LoopRecorder) will protect current segment here
     }
 
-    // ── Session dir stub (replaced by SessionManager — Module 4) ──────────
-
-    private fun createSessionDirStub(): File {
-        val ts         = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val baseDir    = getExternalFilesDir("sessions") ?: filesDir.resolve("sessions")
-        val sessionDir = File(baseDir, "session_$ts")
-        sessionDir.mkdirs()
-        Log.i(TAG, "Session dir created: ${sessionDir.absolutePath}")
-        return sessionDir
-    }
+    // ── createSessionDirStub() removed — Module 4 SessionManager owns session directory creation ──
 
     // ── WakeLock ───────────────────────────────────────────────────────────
 
@@ -289,12 +344,27 @@ class RecordingService : LifecycleService() {
         }
     }
 
+    // ── GPS monitor — always-on from onCreate() to onDestroy() ─────────────
+    // Polls gpsCollector.hasValidFix every second and pushes into _hasGpsFix.
+    // Completely independent of recording state — the UI label reflects the
+    // live GNSS fix status at all times, not just during a recording session.
+    private fun startGpsMonitorLoop() {
+        gpsMonitorJob?.cancel()
+        gpsMonitorJob = lifecycleScope.launch {
+            while (true) {
+                _hasGpsFix.value = gpsCollector.hasValidFix
+                delay(1_000L)
+            }
+        }
+    }
+
     private fun startStatusUpdateLoop() {
         statusUpdateJob = lifecycleScope.launch {
             while (true) {
                 delay(STATUS_UPDATE_MS)
-                val gps = if (telemetryEngine.hasValidGpsFix) "GPS ✓" else "GPS acquiring…"
-                val ntp = if (telemetryEngine.ntpSyncStatus == "SYNCED") "NTP ✓" else "NTP ✗"
+                val hasfix = gpsCollector.hasValidFix
+                val gps = if (hasfix) "GPS \u2705" else "GPS acquiring\u2026"
+                val ntp = if (telemetryEngine.ntpSyncStatus == "SYNCED") "NTP \u2705" else "NTP \u274c"
                 updateNotification("Recording  $gps  $ntp")
             }
         }

@@ -31,7 +31,24 @@ data class GpsRecord(
     @SerializedName("speed_kmh")   val speedKmh:     Float,
     @SerializedName("heading_deg") val headingDeg:   Float,
     val hdop:                                         Float,
+
+    // Total satellites contributing to fix
     val satellites:                                   Int,
+
+    // Per-constellation in-fix counts (Dimensity 7300 Ultra: GPS/GLO/GAL/BDS/SBAS/QZSS)
+    @SerializedName("sats_gps")    val satsGps:      Int,
+    @SerializedName("sats_glo")    val satsGlo:      Int,
+    @SerializedName("sats_gal")    val satsGal:      Int,
+    @SerializedName("sats_bds")    val satsBds:      Int,
+    @SerializedName("sats_qzss")   val satsQzss:     Int,
+
+    // SBAS (EGNOS/WAAS/MSAS/GAGAN) — differential correction pseudoranges in fix
+    @SerializedName("sats_sbas")   val satsSbas:     Int,
+    @SerializedName("sbas_active") val sbasActive:   Boolean,
+
+    // A-GPS: coarse position seed was available at collector start (speeds cold-start)
+    @SerializedName("agps_seeded") val agpsSeeded:   Boolean,
+
     @SerializedName("fix_status")  val fixStatus:    String   // "VALID" | "NO_FIX"
 )
 
