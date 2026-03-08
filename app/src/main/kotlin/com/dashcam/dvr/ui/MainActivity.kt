@@ -7,7 +7,6 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.IBinder
 import android.util.Log
 import android.view.WindowManager
@@ -46,16 +45,24 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraManager  : DVRCameraManager
     private lateinit var cameraValidator: CameraValidator
 
-    private var recordingService: RecordingService? = null
-    private var serviceBound = false
-    private var currentSessionDir: File? = null
+    private var recordingService    : RecordingService? = null
+    private var serviceBound        = false
+    private var currentSessionDir   : File? = null
+    // Guard: observeServiceState() must only register coroutines ONCE per Activity instance.
+    // onServiceConnected() can fire multiple times (rebind after onStop) — without this flag
+    // each rebind adds another collector, causing duplicate Recording events → extra empty dirs.
+    private var stateObserversStarted = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             recordingService = (binder as RecordingService.RecordingBinder).getService()
             serviceBound = true
-            observeServiceState()
-            Log.d(TAG, "Bound to RecordingService")
+            // Only register observers once — prevents duplicate collectors on rebind
+            if (!stateObserversStarted) {
+                stateObserversStarted = true
+                observeServiceState()
+            }
+            Log.d(TAG, "Bound to RecordingService (observers started=$stateObserversStarted)")
         }
         override fun onServiceDisconnected(name: ComponentName) {
             recordingService = null
@@ -116,13 +123,13 @@ class MainActivity : AppCompatActivity() {
     // ── Views & Clicks ────────────────────────────────────────────────────
 
     private fun bindViews() {
-        previewRear     = findViewById(R.id.previewRear)
-        previewFront    = findViewById(R.id.previewFront)
-        tvTimer         = findViewById(R.id.tvTimer)
-        tvGpsStatus     = findViewById(R.id.tvGpsStatus)
-        tvCameraStatus  = findViewById(R.id.tvCameraStatus)
-        btnRecord       = findViewById(R.id.btnRecord)
-        btnEvent        = findViewById(R.id.btnEvent)
+        previewRear    = findViewById(R.id.previewRear)
+        previewFront   = findViewById(R.id.previewFront)
+        tvTimer        = findViewById(R.id.tvTimer)
+        tvGpsStatus    = findViewById(R.id.tvGpsStatus)
+        tvCameraStatus = findViewById(R.id.tvCameraStatus)
+        btnRecord      = findViewById(R.id.btnRecord)
+        btnEvent       = findViewById(R.id.btnEvent)
     }
 
     private fun setupClickListeners() {
@@ -197,13 +204,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
-            cameraManager.state.collectLatest { state ->
-                when (state) {
+            cameraManager.state.collectLatest { camState ->
+                when (camState) {
                     is DVRCameraManager.CameraState.Previewing ->
-                        tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_teal))
+                        tvCameraStatus.setTextColor(
+                            ContextCompat.getColor(this@MainActivity, R.color.dvr_teal))
                     is DVRCameraManager.CameraState.Error -> {
-                        tvCameraStatus.text = "Camera error: ${state.message}"
-                        tvCameraStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
+                        tvCameraStatus.text = "Camera error: ${camState.message}"
+                        tvCameraStatus.setTextColor(
+                            ContextCompat.getColor(this@MainActivity, R.color.dvr_red))
                     }
                     else -> {}
                 }
@@ -211,10 +220,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Session directory ─────────────────────────────────────────────────
-
     private fun createSessionDir(): File {
-        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val ts   = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val base = File(getExternalFilesDir(null), "DVR")
         return File(base, "${AppConstants.SESSION_DIR_PREFIX}$ts").also { it.mkdirs() }
     }
@@ -223,25 +230,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun observeServiceState() {
         lifecycleScope.launch {
-            recordingService?.state?.collectLatest { state ->
-                when (state) {
+            recordingService?.state?.collectLatest { svcState ->
+                Log.d(TAG, "ServiceState → $svcState")
+                when (svcState) {
                     is RecordingService.ServiceState.Recording -> {
                         btnRecord.text = getString(R.string.stop_recording)
                         btnRecord.backgroundTintList =
                             ContextCompat.getColorStateList(this@MainActivity, R.color.dvr_red)
                         btnEvent.isEnabled = true
-                        // Wire: service started recording → start actual camera recording
                         val sessionDir = createSessionDir().also { currentSessionDir = it }
-                        val started = cameraManager.startVideoRecording(sessionDir)
-                        if (started) {
-                            Log.i(TAG, "Video recording wired → ${sessionDir.absolutePath}")
-                            Toast.makeText(this@MainActivity,
-                                "Recording to DVR/${sessionDir.name}", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Log.e(TAG, "startVideoRecording returned false")
-                            Toast.makeText(this@MainActivity,
-                                "Camera not ready — retrying", Toast.LENGTH_SHORT).show()
-                        }
+                        val ok = cameraManager.startVideoRecording(sessionDir)
+                        Log.i(TAG, "startVideoRecording=$ok → ${sessionDir.name}")
+                        if (ok) Toast.makeText(this@MainActivity,
+                            "REC → ${sessionDir.name}", Toast.LENGTH_SHORT).show()
+                        else Toast.makeText(this@MainActivity,
+                            "Camera not ready for recording", Toast.LENGTH_LONG).show()
                     }
                     is RecordingService.ServiceState.Idle -> {
                         btnRecord.text = getString(R.string.start_recording)
@@ -249,16 +252,13 @@ class MainActivity : AppCompatActivity() {
                             ContextCompat.getColorStateList(this@MainActivity, R.color.dvr_teal)
                         btnEvent.isEnabled = false
                         tvTimer.text = "00:00:00"
-                        // Wire: service stopped → stop camera recording
                         cameraManager.stopVideoRecording()
-                        currentSessionDir?.let {
-                            Log.i(TAG, "Session saved to: ${it.absolutePath}")
-                        }
+                        Log.i(TAG, "Session closed: ${currentSessionDir?.absolutePath}")
                         currentSessionDir = null
                     }
                     is RecordingService.ServiceState.Error ->
                         Toast.makeText(this@MainActivity,
-                            "Error: ${state.message}", Toast.LENGTH_LONG).show()
+                            "Error: ${svcState.message}", Toast.LENGTH_LONG).show()
                     else -> {}
                 }
             }
