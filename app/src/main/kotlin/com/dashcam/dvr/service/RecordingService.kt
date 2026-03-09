@@ -37,6 +37,7 @@ import com.dashcam.dvr.evidence.EvidencePackager
 import com.dashcam.dvr.camera.DVRCameraManager
 import com.dashcam.dvr.camera.FrontCameraRecorder
 import com.dashcam.dvr.loop.LoopRecorder
+import com.dashcam.dvr.telemetry.model.GpsRecord
 
 /**
  * RecordingService — Foreground Service
@@ -56,13 +57,13 @@ import com.dashcam.dvr.loop.LoopRecorder
  */
 class RecordingService : LifecycleService() {
 
-    // ── Binder ─────────────────────────────────────────────────────────────
+    // ── Binder ─────────────────────────────────────────────────────────────────────
     inner class RecordingBinder : Binder() {
         fun getService(): RecordingService = this@RecordingService
     }
     private val binder = RecordingBinder()
 
-    // ── State ──────────────────────────────────────────────────────────────
+    // ── State ──────────────────────────────────────────────────────────────────────
     sealed class ServiceState {
         object Idle      : ServiceState()
         object Starting  : ServiceState()
@@ -81,8 +82,15 @@ class RecordingService : LifecycleService() {
     private val _hasGpsFix = MutableStateFlow(false)
     val hasGpsFix: StateFlow<Boolean> = _hasGpsFix
 
+    // GPS telemetry stream — updated at 5 Hz from GpsCollector.analysisCallback
+    private val _gpsData = MutableStateFlow<GpsRecord?>(null)
+    val gpsData: StateFlow<GpsRecord?> = _gpsData
 
-    // ── Module 3 ───────────────────────────────────────────────────────────
+    // Protected segment count — refreshed by LoopRecorder after each protect/evict
+    private val _protectedCount = MutableStateFlow(0)
+    val protectedCount: StateFlow<Int> = _protectedCount
+
+    // ── Module 3 ───────────────────────────────────────────────────────────────────
     private lateinit var telemetryEngine: TelemetryEngine
     private lateinit var sessionManager:  SessionManager
 
@@ -90,16 +98,17 @@ class RecordingService : LifecycleService() {
     // Independent of recording. TelemetryEngine just hooks/unhooks the write callback.
     private lateinit var gpsCollector: GpsCollector
 
-    // ── WakeLock ───────────────────────────────────────────────────────────
+    // ── WakeLock ───────────────────────────────────────────────────────────────────
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // ── Jobs ───────────────────────────────────────────────────────────────
+    // ── Jobs ───────────────────────────────────────────────────────────────────────
     private var timerJob:        Job? = null
     private var statusUpdateJob: Job? = null
     private var gpsMonitorJob:    Job? = null
 
-        // Current session dir - set by handleStartRecording(), cleared on stop
-        // ── Module 5: Collision + Road Quality ───────────────────────────────────
+    // ── Module 5: Collision + Road Quality ────────────────────────────────────────
+    // GravityProvider is always-on (like GpsCollector): started in onCreate(),
+    // stopped in onDestroy(). Never stopped between recording sessions.
     private val _collisionEvents = MutableSharedFlow<ImpactEvent>(extraBufferCapacity = 8)
     val collisionEvents = _collisionEvents.asSharedFlow()
     private lateinit var gravityProvider:   GravityProvider
@@ -108,12 +117,12 @@ class RecordingService : LifecycleService() {
     private lateinit var collisionDetector: CollisionDetector
     private var eventsLog: EventsLog? = null
     private var currentSessionDir: File? = null
-    // -- Module 7 fields --
+    // ── Module 7 fields ───────────────────────────────────────────────────────────
     private var loopRecorder:  LoopRecorder? = null
     var dvrCamera:   DVRCameraManager?   = null
     var frontCamera: FrontCameraRecorder? = null
 
-    // ── Companion ──────────────────────────────────────────────────────────
+    // ── Companion ──────────────────────────────────────────────────────────────────
     companion object {
         private const val TAG = "RecordingService"
 
@@ -126,15 +135,16 @@ class RecordingService : LifecycleService() {
         private const val STATUS_UPDATE_MS = 2_000L
     }
 
-    // ── Lifecycle ──────────────────────────────────────────────────────────
+    // ── Lifecycle ──────────────────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
         telemetryEngine = TelemetryEngine(applicationContext)
         sessionManager  = SessionManager(applicationContext)
         gpsCollector = GpsCollector(applicationContext, telemetryEngine.ntpManager)
-        gpsCollector.start()   // GNSS warm-up — always on regardless of recording
-        startGpsMonitorLoop()   // keeps _hasGpsFix live at all times
+        gpsCollector.start()   // GNSS warm-up
+        gpsCollector.analysisCallback = { rec -> _gpsData.value = rec } // always on regardless of recording
+        startGpsMonitorLoop()   // keeps _hasGpsFix live at all times; also creates detectors
         Log.i(TAG, "RecordingService created")
     }
 
@@ -175,13 +185,15 @@ class RecordingService : LifecycleService() {
         }
         releaseWakeLock()
         gpsMonitorJob?.cancel(); gpsMonitorJob = null
+        // FIX C: GravityProvider stopped here (always-on; only stop in onDestroy)
+        if (::gravityProvider.isInitialized) gravityProvider.stop()
         if (::gpsCollector.isInitialized) gpsCollector.stop()
         Log.i(TAG, "RecordingService destroyed")
     }
 
-    // ── Instance methods called by MainActivity (via bound service) ────────
+    // ── Instance methods called by MainActivity (via bound service) ────────────────
 
-        /** Pre-allocate the session dir for cameras, then pass path to startRecording(). */
+    /** Pre-allocate the session dir for cameras, then pass path to startRecording(). */
     fun prepareSessionDir(): File = sessionManager.prepareSessionDir()
 
     /** Called by MainActivity when user taps Record. Pass the pre-allocated dir path. */
@@ -220,7 +232,7 @@ class RecordingService : LifecycleService() {
         updateNotification("DVR Ready")
     }
 
-    // ── Internal start/stop handlers ───────────────────────────────────────
+    // ── Internal start/stop handlers ──────────────────────────────────────────────
 
     private fun handleStartRecording(intent: Intent) {
         if (_state.value is ServiceState.Recording) {
@@ -229,7 +241,6 @@ class RecordingService : LifecycleService() {
         _state.value = ServiceState.Starting
         startForegroundNotification()
         acquireWakeLock()
-
 
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
@@ -279,9 +290,14 @@ class RecordingService : LifecycleService() {
                         collisionDetector.onGyroSample(rec)
                         maneuverContext.onGyroSample(rec)
                     },
+                    // FIX C: Compose GPS fan-out with _gpsData update.
+                    // Previously TelemetryEngine.start() overwrote analysisCallback
+                    // with only the ManeuverContext consumer, killing the _gpsData
+                    // StateFlow that drives the UI.  Now both run on every GPS fix.
                     onGpsFanOut   = { rec ->
-                        maneuverContext.onGpsRecord(rec)
-                    }   //  ManeuverContext GPS+gyro fusion (Module 5)
+                        _gpsData.value = rec            // maintain UI GPS stream
+                        maneuverContext.onGpsRecord(rec) // ManeuverContext fusion
+                    }
                 )
 
                 // Module 7: start loop recorder
@@ -314,15 +330,15 @@ class RecordingService : LifecycleService() {
                     _state.value = ServiceState.Error(e.message ?: "Unknown error")
                 }
                 telemetryEngine.stop()
-            gravityProvider.stop()                     // unregister TYPE_GRAVITY sensor
-                            // Module 5: detach write callbacks (detectors stay alive, just stop writing)
-            roadMonitor.writeCallback       = null
-            collisionDetector.writeCallback = null
-            roadMonitor.reset()
-            collisionDetector.reset()
-            maneuverContext.reset()
-            eventsLog = null
-            // Module 4: close session record on startup failure
+                // FIX A: these lines were previously at wrong indent (outside catch).
+                // They now correctly execute only on startup failure, not on success.
+                // gravityProvider.stop() removed — GravityProvider is always-on.
+                roadMonitor.writeCallback       = null
+                collisionDetector.writeCallback = null
+                roadMonitor.reset()
+                collisionDetector.reset()
+                maneuverContext.reset()
+                eventsLog = null
                 currentSessionDir?.let { sessionManager.closeSession(it, "CRASH") }
                 releaseWakeLock()
                 stopSelf()
@@ -338,57 +354,68 @@ class RecordingService : LifecycleService() {
         timerJob?.cancel(); timerJob = null
         statusUpdateJob?.cancel(); statusUpdateJob = null
 
-
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            // Module 7: stop loop recorder
-            loopRecorder?.stop()
-            loopRecorder = null
+            // FIX B: try/finally guarantees stopSelf() is ALWAYS reached even if
+            // loopRecorder.stop(), closeSession(), or EvidencePackager.seal() throw.
+            // gravityProvider.stop() removed — GravityProvider is always-on.
+            try {
+                // Module 7: stop loop recorder
+                loopRecorder?.stop()
+                loopRecorder = null
 
-            // ── Module 3: flush and close telemetry.log ───────────────────────────────
-            telemetryEngine.stop()
+                // Module 3: flush and close telemetry.log
+                telemetryEngine.stop()
 
+                // FIX C: Restore plain _gpsData callback after recording stops.
+                // TelemetryEngine.stop() no longer nulls analysisCallback, but the
+                // composite lambda still references maneuverContext which was reset.
+                // Restore the simple UI-only callback for between-session GPS display.
+                gpsCollector.analysisCallback = { rec -> _gpsData.value = rec }
 
-            gravityProvider.stop()                     // unregister TYPE_GRAVITY sensor
-            // Module 5: detach write callbacks and reset detectors
-            roadMonitor.writeCallback       = null
-            collisionDetector.writeCallback = null
-            roadMonitor.reset()
-            collisionDetector.reset()
-            maneuverContext.reset()
-            eventsLog = null
-            // ── Module 4: close session — write end_ts, final custody.log entry ───────
-            currentSessionDir?.let { dir ->
-                sessionManager.closeSession(dir, "USER_STOP")
-            }
+                // Module 5: detach write callbacks and reset detectors
+                roadMonitor.writeCallback       = null
+                collisionDetector.writeCallback = null
+                roadMonitor.reset()
+                collisionDetector.reset()
+                maneuverContext.reset()
+                eventsLog = null
 
-            // Module 6: seal the evidence package (hash → sign → TSA)
-            // Runs on the IO dispatcher — network for TSA is acceptable here.
-            currentSessionDir?.let { dir ->
-                val sealResult = EvidencePackager.seal(dir, sessionManager.installationUuid)
-                if (sealResult != null) {
-                    sessionManager.patchSealResult(dir, sealResult)
-                    Log.i(TAG, "Evidence sealed  tsa=${sealResult.tsaStatus}  files=${sealResult.fileCount}  hash=${sealResult.manifestHash?.take(16)}...")
-                } else {
-                    Log.e(TAG, "EvidencePackager.seal() returned null — session NOT sealed")
+                // Module 4: close session — write end_ts, final custody.log entry
+                currentSessionDir?.let { dir ->
+                    sessionManager.closeSession(dir, "USER_STOP")
                 }
-            }
 
-            if (telemetryEngine.ntpSyncStatus != "SYNCED")
-                Log.w(TAG, "Session CLOCK_UNVERIFIED — ${telemetryEngine.ntpSyncStatus}")
+                // Module 6: seal the evidence package (hash → sign → TSA)
+                currentSessionDir?.let { dir ->
+                    val sealResult = EvidencePackager.seal(dir, sessionManager.installationUuid)
+                    if (sealResult != null) {
+                        sessionManager.patchSealResult(dir, sealResult)
+                        Log.i(TAG, "Evidence sealed  tsa=${sealResult.tsaStatus}  files=${sealResult.fileCount}  hash=${sealResult.manifestHash?.take(16)}...")
+                    } else {
+                        Log.e(TAG, "EvidencePackager.seal() returned null — session NOT sealed")
+                    }
+                }
 
-            Log.i(TAG, "Session closed — " +
-                "session=${currentSessionDir?.name ?: "?"}  " +
-                "first_fix=${gpsCollector.firstValidFixTs ?: "NONE"}  " +
-                "ntp=${telemetryEngine.ntpSyncStatus}  " +
-                "offset=${telemetryEngine.ntpOffsetMs}ms"
-            )
+                if (telemetryEngine.ntpSyncStatus != "SYNCED")
+                    Log.w(TAG, "Session CLOCK_UNVERIFIED — ${telemetryEngine.ntpSyncStatus}")
 
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                _elapsedSeconds.value = 0L
-                releaseWakeLock()
-                _state.value = ServiceState.Idle
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                Log.i(TAG, "Session closed — " +
+                    "session=${currentSessionDir?.name ?: "?"}  " +
+                    "first_fix=${gpsCollector.firstValidFixTs ?: "NONE"}  " +
+                    "ntp=${telemetryEngine.ntpSyncStatus}  " +
+                    "offset=${telemetryEngine.ntpOffsetMs}ms"
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during recording stop: ${e.message}", e)
+                currentSessionDir?.let { sessionManager.closeSession(it, "CRASH") }
+            } finally {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    _elapsedSeconds.value = 0L
+                    releaseWakeLock()
+                    _state.value = ServiceState.Idle
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
             }
         }
     }
@@ -398,9 +425,7 @@ class RecordingService : LifecycleService() {
         loopRecorder?.protectCurrentSegment("MANUAL")
     }
 
-    // ── createSessionDirStub() removed — Module 4 SessionManager owns session directory creation ──
-
-    // ── WakeLock ───────────────────────────────────────────────────────────
+    // ── WakeLock ───────────────────────────────────────────────────────────────────
 
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -414,7 +439,7 @@ class RecordingService : LifecycleService() {
         wakeLock = null
     }
 
-    // ── Loops ──────────────────────────────────────────────────────────────
+    // ── Loops ──────────────────────────────────────────────────────────────────────
 
     private fun startTimerLoop() {
         timerJob = lifecycleScope.launch {
@@ -425,14 +450,14 @@ class RecordingService : LifecycleService() {
         }
     }
 
-    // ── GPS monitor — always-on from onCreate() to onDestroy() ─────────────
+    // ── GPS monitor + detector creation — always-on from onCreate() to onDestroy() ─
     // Polls gpsCollector.hasValidFix every second and pushes into _hasGpsFix.
-    // Completely independent of recording state — the UI label reflects the
-    // live GNSS fix status at all times, not just during a recording session.
+    // Also creates GravityProvider, ManeuverContext, RoadQualityMonitor, and
+    // CollisionDetector here so they are always ready (even before first recording).
     private fun startGpsMonitorLoop() {
         gpsMonitorJob?.cancel()
-                // Module 5: create detectors - GravityProvider is shared source of truth
-                // (Fix 1+3: replaces two independent wrong-sign gravity EMAs)
+        // Module 5: create detectors — GravityProvider is the shared source of truth
+        // for gravity (replaces two independent wrong-sign EMAs).
         gravityProvider   = GravityProvider(this)
         gravityProvider.start()                        // registers TYPE_GRAVITY sensor
         maneuverContext   = ManeuverContext()
@@ -450,6 +475,7 @@ class RecordingService : LifecycleService() {
         gpsMonitorJob = lifecycleScope.launch {
             while (true) {
                 _hasGpsFix.value = gpsCollector.hasValidFix
+                _protectedCount.value = loopRecorder?.protectedCount() ?: 0
                 delay(1_000L)
             }
         }
@@ -467,7 +493,7 @@ class RecordingService : LifecycleService() {
         }
     }
 
-    // ── Notification ───────────────────────────────────────────────────────
+    // ── Notification ───────────────────────────────────────────────────────────────
 
     private fun startForegroundNotification() =
         startForeground(NOTIFICATION_ID, buildNotification("Starting recording…"))
@@ -488,7 +514,7 @@ class RecordingService : LifecycleService() {
             .addAction(0, "Event", triggerEventPendingIntent())
             .build()
 
-    // ── PendingIntents ─────────────────────────────────────────────────────
+    // ── PendingIntents ─────────────────────────────────────────────────────────────
 
     private fun openMainActivityIntent() = PendingIntent.getActivity(
         this, 0, Intent(this, MainActivity::class.java),
@@ -507,18 +533,23 @@ class RecordingService : LifecycleService() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
-    // ── Module 5: impact event handler ───────────────────────────────────────
+    // ── Module 5: impact event handler ────────────────────────────────────────────
     private fun handleImpactEvent(event: ImpactEvent) {
         Log.w(TAG, "Impact event: ${event.direction}  peakG=${event.peakG}g  road=${event.roadState}")
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // FIX A: Both eventsLog write AND custody event append are now
+            // inside try-catch.  Previously appendCustodyEvent was unprotected
+            // — a disk-full IOException would crash the coroutine and prevent
+            // the UI emission below.
             try {
                 eventsLog?.append(event)
+                currentSessionDir?.let { dir ->
+                    sessionManager.appendCustodyEvent(dir, event)
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to write events.log: ${e.message}")
+                Log.e(TAG, "Failed to write impact event: ${e.message}", e)
             }
-            currentSessionDir?.let { dir ->
-                sessionManager.appendCustodyEvent(dir, event)
-            }
+            // Always emit to UI regardless of IO write failures
             _collisionEvents.emit(event)
         }
     }

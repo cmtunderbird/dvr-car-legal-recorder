@@ -4,8 +4,34 @@
     <string name="start_recording">Start Recording</string>
     <string name="stop_recording">Stop Recording</string>
     <string name="save_event">Save Event</string>
-    <string name="gps_acquiring">GPS Acquiring…</string>
-    <string name="recording_active">● REC</string>
+    <string name="gps_acquiring">GPS Acquiring\u2026</string>
+    <string name="recording_active">\u2B24 REC</string>
     <string name="channel_recording_name">Recording Status</string>
     <string name="channel_alert_name">DVR Alerts</string>
+
+    <!-- Setup Wizard strings -->
+    <string name="wizard_welcome_body">DVR Evidence is a professional dual-camera vehicle recorder with
+tamper-evident evidence packaging and GPS telemetry.\n\nIMPORTANT: Dashcam laws, windshield mounting
+restrictions, and audio recording consent rules vary by jurisdiction. It is your responsibility to comply
+with local regulations.\n\nThis setup wizard takes about 60 seconds and configures the app for reliable
+background operation.</string>
+
+    <string name="wizard_permissions_body">DVR Evidence requires the following permissions to function:\n\n
+\u2022 Camera \u2014 dual-camera recording (road + cabin)\n
+\u2022 Microphone \u2014 cabin audio (optional, disabled by default)\n
+\u2022 Location \u2014 GPS telemetry and evidence timestamps\n
+\u2022 Notifications \u2014 foreground service and alert delivery\n\nAll data stays on your device. Nothing is uploaded
+without your explicit action.</string>
+
+    <string name="wizard_battery_body">Android battery optimisation will stop background apps to save power.
+This WILL interrupt recording when the screen is off.\n\nYou must exempt DVR Evidence from battery
+optimisation to ensure the recording service stays alive during your entire journey.\n\nOn the next screen,
+tap \u201CAllow\u201D when prompted.\n\nOn Xiaomi/HyperOS devices: also go to Settings \u2192 Apps \u2192 DVR Evidence \u2192
+Battery \u2192 No restrictions.</string>
+
+    <string name="wizard_done_body">Setup complete!\n\nDVR Evidence is ready to record.\n\n
+\u2022 Mount your phone on the windshield with the rear camera facing the road.\n
+\u2022 Connect to USB power \u2014 battery-only operation will deplete in 1\u20132 hours under dual-camera load.\n
+\u2022 Tap Start Recording to begin, or leave the app \u2014 recording will survive screen-off.\n\nEvidence packages
+are stored in a tamper-evident format with Ed25519 signatures and RFC 3161 trusted timestamps.</string>
 </resources>

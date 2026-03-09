@@ -34,7 +34,8 @@ import kotlin.math.sqrt
 class RoadQualityMonitor(
     private val ntpManager:      NtpSyncManager,
     private val gravityProvider: GravityProvider,
-    var writeCallback: ((RoadQualityRecord) -> Unit)? = null
+    // FIX D: @Volatile — set from IO dispatcher, read from IMU HandlerThread at 100 Hz.
+    @Volatile var writeCallback: ((RoadQualityRecord) -> Unit)? = null
 ) {
     companion object {
         private const val TAG            = "RoadQualityMonitor"

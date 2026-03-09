@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- activity_event_review.xml — protected segments browser (landscape) -->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/dvr_bg">
+
+    <TextView
+        android:id="@+id/tvEventsCapWarning"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/dvr_amber"
+        android:textSize="12sp"
+        android:padding="12dp"
+        android:background="#33D4AC0D"
+        android:visibility="gone"
+        android:text="" />
+
+    <TextView
+        android:id="@+id/tvEventsEmpty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/text_secondary"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:padding="40dp"
+        android:visibility="gone"
+        android:text="No protected events found.\nProtected events appear here after a manual save or collision trigger." />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvProtectedEvents"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false"
+        android:paddingBottom="8dp" />
+
+</LinearLayout>

@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- item_protected_segment.xml — single protected segment row -->
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/dvr_blue"
+    android:padding="12dp"
+    android:layout_marginVertical="2dp">
+
+    <!-- Reason / segment number -->
+    <TextView
+        android:id="@+id/tvSegReason"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:textColor="@color/white"
+        android:textSize="13sp"
+        android:fontFamily="monospace"
+        android:textStyle="bold"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/tvSegStatus"
+        android:text="Seg #1  •  MANUAL" />
+
+    <!-- Status badge (COMPLETE / PARTIAL) -->
+    <TextView
+        android:id="@+id/tvSegStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="@color/white"
+        android:textSize="10sp"
+        android:fontFamily="monospace"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="3dp"
+        app:layout_constraintTop_toTopOf="@id/tvSegReason"
+        app:layout_constraintEnd_toStartOf="@id/btnSegDelete"
+        android:layout_marginEnd="8dp"
+        android:background="@drawable/chip_green"
+        android:text="COMPLETE" />
+
+    <!-- Timestamp -->
+    <TextView
+        android:id="@+id/tvSegTimestamp"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:textColor="@color/text_secondary"
+        android:textSize="11sp"
+        android:fontFamily="monospace"
+        android:layout_marginTop="4dp"
+        app:layout_constraintTop_toBottomOf="@id/tvSegReason"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/btnSegDelete"
+        android:text="08 Mar 23:26:40" />
+
+    <!-- Size + duration -->
+    <TextView
+        android:id="@+id/tvSegMeta"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:textColor="@color/text_secondary"
+        android:textSize="10sp"
+        android:fontFamily="monospace"
+        android:layout_marginTop="2dp"
+        app:layout_constraintTop_toBottomOf="@id/tvSegTimestamp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/btnSegDelete"
+        android:text="Duration: 180s  •  Size: 73.4 MB" />
+
+    <!-- Delete button -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnSegDelete"
+        style="@style/Widget.Material3.Button.OutlinedButton"
+        android:layout_width="72dp"
+        android:layout_height="36dp"
+        android:text="Delete"
+        android:textSize="11sp"
+        android:textColor="@color/dvr_red"
+        app:strokeColor="@color/dvr_red"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId   = "com.dashcam.dvr"
-        minSdk          = 26          // Android 8 — required for Foreground Service notifications
+        minSdk          = 26          // Android 8 â€” required for Foreground Service notifications
         targetSdk       = 34
         versionCode     = 1
         versionName     = "1.0.0"
@@ -25,7 +25,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Signing config applied via CI environment variables — see GitHub Actions workflow
+            // Signing config applied via CI environment variables â€” see GitHub Actions workflow
         }
         debug {
             isDebuggable     = true
@@ -77,6 +77,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
+    implementation(libs.recyclerview)
     implementation(libs.androidx.constraintlayout)
 
     // Lifecycle
@@ -111,4 +112,5 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
+
 

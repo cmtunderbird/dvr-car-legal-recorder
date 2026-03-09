@@ -22,7 +22,7 @@ import java.io.File
  * TelemetryEngine
  *
  * Blueprint §6 — Telemetry Engine (Enhanced)
- * ─────────────────────────────────────────────────────────────
+ * —————————————————————————————————————————————————————————————
  * Orchestrates all sensor writing for a recording session.
  *
  * GPS LIFECYCLE — IMPORTANT:
@@ -37,11 +37,11 @@ import java.io.File
  *   stop()
  *
  * State exposed to SessionManager (Module 4) via public properties:
- *   firstValidFixTs   → session.json "first_valid_fix_ts"
- *   ntpSyncStatus     → session.json "clock_status"
- *   ntpOffsetMs       → session.json "ntp_offset_ms"
- *   ntpServerUsed     → session.json "ntp_server"
- *   barometerPresent  → session.json "barometer_available"
+ *   firstValidFixTs   -> session.json "first_valid_fix_ts"
+ *   ntpSyncStatus     -> session.json "clock_status"
+ *   ntpOffsetMs       -> session.json "ntp_offset_ms"
+ *   ntpServerUsed     -> session.json "ntp_server"
+ *   barometerPresent  -> session.json "barometer_available"
  */
 class TelemetryEngine(private val context: Context) {
 
@@ -64,7 +64,7 @@ class TelemetryEngine(private val context: Context) {
     @Volatile private var _running = false
     val isRunning: Boolean get() = _running
 
-    // ── Published state for SessionManager (Module 4) ──────────────────────
+    // —— Published state for SessionManager (Module 4) ——————————————————————
     val firstValidFixTs:  String?  get() = if (::activeGps.isInitialized) activeGps.firstValidFixTs else null
     val hasValidGpsFix:   Boolean  get() = if (::activeGps.isInitialized) activeGps.hasValidFix      else false
     val ntpSyncStatus:    String   get() = ntpManager.syncStatus
@@ -72,7 +72,7 @@ class TelemetryEngine(private val context: Context) {
     val ntpServerUsed:    String   get() = ntpManager.serverUsed
     val barometerPresent: Boolean  get() = if (::baro.isInitialized) baro.isAvailable else false
 
-    // ── Lifecycle ───────────────────────────────────────────────────────────
+    // —— Lifecycle ———————————————————————————————————————————————————————————
 
     /**
      * Start the Telemetry Engine for a new recording session.
@@ -87,7 +87,7 @@ class TelemetryEngine(private val context: Context) {
     fun start(
         sessionDir:    File,
         gpsCollector:  GpsCollector,
-        onNtpSynced:   ((NtpRecord)   -> Unit)? = null,   // → SessionManager.patchNtpAndSensors()
+        onNtpSynced:   ((NtpRecord)   -> Unit)? = null,   // -> SessionManager.patchNtpAndSensors()
         onAccelFanOut: ((AccelRecord) -> Unit)? = null,
         onGyroFanOut:  ((GyroRecord)  -> Unit)? = null,
         onGpsFanOut:   ((GpsRecord)   -> Unit)? = null
@@ -110,11 +110,11 @@ class TelemetryEngine(private val context: Context) {
             ntpManager    = ntpManager,
             onAccelRecord = { record ->
                 writer.write(record)
-                onAccelFanOut?.invoke(record)   // → CollisionDetector (Module 5)
+                onAccelFanOut?.invoke(record)   // -> CollisionDetector (Module 5)
             },
             onGyroRecord  = { record ->
                 writer.write(record)
-                onGyroFanOut?.invoke(record)    // → CollisionDetector (Module 5)
+                onGyroFanOut?.invoke(record)    // -> CollisionDetector (Module 5)
             }
         )
 
@@ -159,7 +159,10 @@ class TelemetryEngine(private val context: Context) {
         // Unhook GPS writer — GNSS hardware stays alive in RecordingService
         if (::activeGps.isInitialized) {
             activeGps.writeCallback = null
-            activeGps.analysisCallback = null
+            // FIX C: Do NOT null analysisCallback here.  RecordingService owns
+            // the GPS analysis lifecycle — it composes _gpsData + ManeuverContext
+            // in onGpsFanOut and restores the plain _gpsData callback after stop.
+            // Nulling it here killed GPS data for the UI between sessions.
             Log.i(TAG, "GPS write callback cleared — GNSS hardware keeps running")
         }
 

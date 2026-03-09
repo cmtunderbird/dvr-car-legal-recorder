@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  activity_setup_wizard.xml — first-run setup wizard screen
+  Portrait orientation, centered content with step progress bar.
+-->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/dvr_bg"
+    android:padding="24dp">
+
+    <ProgressBar
+        android:id="@+id/wizardProgress"
+        style="@android:style/Widget.ProgressBar.Horizontal"
+        android:layout_width="match_parent"
+        android:layout_height="6dp"
+        android:layout_marginBottom="32dp"
+        android:progressTint="@color/dvr_teal"
+        android:max="3"
+        android:progress="0" />
+
+    <ImageView
+        android:id="@+id/ivWizardIcon"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginBottom="24dp"
+        android:tint="@color/dvr_teal"
+        android:src="@android:drawable/ic_menu_camera"
+        android:contentDescription="Step icon" />
+
+    <TextView
+        android:id="@+id/tvWizardTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/white"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:fontFamily="monospace"
+        android:gravity="center"
+        android:layout_marginBottom="16dp"
+        android:text="Welcome" />
+
+    <TextView
+        android:id="@+id/tvWizardBody"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:textColor="@color/text_secondary"
+        android:textSize="14sp"
+        android:lineSpacingMultiplier="1.5"
+        android:gravity="top"
+        android:text="" />
+
+    <TextView
+        android:id="@+id/tvWizardWarning"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/dvr_amber"
+        android:textSize="13sp"
+        android:padding="10dp"
+        android:background="#33D4AC0D"
+        android:layout_marginBottom="12dp"
+        android:visibility="gone"
+        android:text="" />
+
+    <Button
+        android:id="@+id/btnWizardPrimary"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:backgroundTint="@color/dvr_teal"
+        android:textColor="@color/white"
+        android:textSize="15sp"
+        android:layout_marginBottom="8dp"
+        android:text="Continue" />
+
+    <Button
+        android:id="@+id/btnWizardSkip"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:backgroundTint="@color/dvr_blue"
+        android:textColor="@color/text_secondary"
+        android:textSize="13sp"
+        android:visibility="gone"
+        android:text="Skip for now" />
+
+</LinearLayout>

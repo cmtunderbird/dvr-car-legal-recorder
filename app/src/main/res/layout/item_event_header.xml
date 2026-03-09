@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- item_event_header.xml — session group header in event review list -->
+<TextView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/tvEventHeader"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:textColor="@color/dvr_teal"
+    android:textSize="11sp"
+    android:fontFamily="monospace"
+    android:textAllCaps="true"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="10dp"
+    android:background="@color/dvr_blue_dark"
+    android:text="SESSION HEADER" />

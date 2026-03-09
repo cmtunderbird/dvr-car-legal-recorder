@@ -76,7 +76,10 @@ class CollisionDetector(
     private val maneuverContext: ManeuverContext,
     private val gravityProvider: GravityProvider,
     private val onEvent:         (ImpactEvent) -> Unit,
-    var writeCallback: ((CollisionRecord) -> Unit)? = null
+    // FIX D: @Volatile — set from IO dispatcher, read from IMU HandlerThread at 100 Hz.
+    // Without volatile, the IMU thread might see a stale (null) reference after
+    // RecordingService wires up the callback, causing missed telemetry writes.
+    @Volatile var writeCallback: ((CollisionRecord) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "CollisionDetector"

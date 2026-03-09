@@ -156,6 +156,24 @@ class SegmentIndex(
         return true
     }
 
+    /**
+     * Mark a segment as DELETED in the index (used by EventReviewActivity after
+     * the operator manually deletes a protected event from the review screen).
+     * The custody.log entry must be written by the caller before calling this.
+     */
+    @Synchronized
+    fun markDeleted(id: Int): Boolean {
+        val idx = segments.indexOfFirst { it.id == id }
+        if (idx < 0) return false
+        segments[idx] = segments[idx].copy(
+            status    = Segment.STATUS_DELETED,
+            protected = false
+        )
+        persist()
+        Log.i(TAG, "Segment #$id marked DELETED (manual review)")
+        return true
+    }
+
     // ── Protection ────────────────────────────────────────────────────────────
 
     /**

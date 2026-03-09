@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicLong
  * TelemetryWriter
  *
  * Blueprint §11 — telemetry.log (JSONL format)
- * ─────────────────────────────────────────────
+ * —————————————————————————————————————————————
  * Writes one JSON object per line. Append-only — parseable line-by-line even
  * after unexpected termination.
  *
@@ -51,10 +51,12 @@ class TelemetryWriter(private val telemetryFile: File) {
     private val dropped = AtomicLong(0)
 
     @Volatile private var writer: BufferedWriter? = null
+    // FIX B: track the drain coroutine so close() can await it
+    private var drainJob: kotlinx.coroutines.Job? = null
 
     fun open() {
         writer = BufferedWriter(FileWriter(telemetryFile, true), WRITE_BUFFER_BYTES)
-        scope.launch { drainLoop() }
+        drainJob = scope.launch { drainLoop() }
         Log.i(TAG, "TelemetryWriter open: ${telemetryFile.absolutePath}")
     }
 
@@ -67,9 +69,20 @@ class TelemetryWriter(private val telemetryFile: File) {
 
     /**
      * Drain remaining records, flush and close. Call once at session end.
+     *
+     * FIX B: Previously close() called channel.close() then immediately
+     * writer.flush()/close(), racing with drainLoop() which was still
+     * iterating the channel on a separate coroutine.  This caused either
+     * an IOException ("Stream closed") or silently dropped the final batch.
+     *
+     * Fix: close the channel (signals no more sends), then JOIN the drain
+     * coroutine so all buffered records are written, THEN flush/close the
+     * writer.  No more race — drainLoop() finishes first, guaranteed.
      */
     suspend fun close() {
-        channel.close()
+        channel.close()                     // signal: no more sends
+        drainJob?.join()                    // wait for drainLoop() to finish writing
+        drainJob = null
         writer?.flush()
         writer?.close()
         writer = null

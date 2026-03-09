@@ -99,6 +99,9 @@ class LoopRecorder(
     /** Callback invoked when the protected-event cap is reached. */
     var onCapReached: (() -> Unit)? = null
 
+    /** Public accessor for protected segment count — polled by RecordingService for HUD. */
+    fun protectedCount(): Int = if (::index.isInitialized) index.protectedCount() else 0
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /**
@@ -403,3 +406,4 @@ class LoopRecorder(
             .parse(ts)?.time
     } catch (_: Exception) { null }
 }
+

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  activity_main.xml — Main DVR screen (landscape).
+  Layout: rear preview (left 72%) + control panel (right 28%)
+  HudOverlayView sits on top of the rear preview — transparent, display only.
+-->
 <androidx.constraintlayout.widget.ConstraintLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -18,11 +23,22 @@
         app:layout_constraintWidth_percent="0.72"
         app:scaleType="fillCenter" />
 
+    <!-- HUD overlay — transparent, drawn on top of rear preview — NEVER modifies recording -->
+    <com.dashcam.dvr.ui.hud.HudOverlayView
+        android:id="@+id/hudOverlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="@android:color/transparent"
+        app:layout_constraintTop_toTopOf="@id/previewRear"
+        app:layout_constraintBottom_toBottomOf="@id/previewRear"
+        app:layout_constraintStart_toStartOf="@id/previewRear"
+        app:layout_constraintEnd_toEndOf="@id/previewRear" />
+
     <TextView
         android:id="@+id/labelRear"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="● ROAD"
+        android:text="ROAD"
         android:textColor="@color/white"
         android:textSize="9sp"
         android:fontFamily="monospace"
@@ -50,18 +66,12 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="● CABIN"
+            android:text="CABIN"
             android:textColor="@color/text_secondary"
             android:textSize="8sp"
             android:fontFamily="monospace"
             android:paddingBottom="2dp" />
 
-        <!--
-            Front camera preview — TextureView locked to 16:9 landscape.
-            ConstraintLayout wrapper enforces the aspect ratio so the TextureView
-            is always wider than tall, matching the camera's native 16:9 frame.
-            The weight=0 wrapper takes only as much height as the 16:9 ratio needs.
-        -->
         <androidx.constraintlayout.widget.ConstraintLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content">
@@ -82,7 +92,7 @@
             android:id="@+id/tvCameraStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Initialising cameras…"
+            android:text="Initialising cameras\u2026"
             android:textColor="@color/text_secondary"
             android:textSize="8sp"
             android:fontFamily="monospace"
@@ -104,7 +114,7 @@
             android:id="@+id/tvGpsStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="⊙ GPS Acquiring…"
+            android:text="GPS Acquiring\u2026"
             android:textColor="@color/dvr_amber"
             android:textSize="9sp"
             android:gravity="center"
@@ -126,7 +136,32 @@
             android:text="@string/save_event"
             android:textSize="11sp"
             app:backgroundTint="@color/dvr_red"
-            android:enabled="false" />
+            android:enabled="false"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Review protected events / settings -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnReviewEvents"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:text="Review Events"
+            android:textSize="10sp"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            app:strokeColor="@color/dvr_teal"
+            android:textColor="@color/dvr_teal"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Protected events counter badge -->
+        <TextView
+            android:id="@+id/tvProtectedBadge"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@color/dvr_amber"
+            android:textSize="8sp"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:visibility="gone"
+            android:text="" />
 
     </LinearLayout>
 
