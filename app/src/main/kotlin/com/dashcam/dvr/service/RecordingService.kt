@@ -117,6 +117,30 @@ class RecordingService : LifecycleService() {
     private lateinit var collisionDetector: CollisionDetector
     private var eventsLog: EventsLog? = null
     private var currentSessionDir: File? = null
+
+    // ── HUD telemetry snapshot (updated from accel/collision fan-outs) ─────────────
+    @Volatile var hudAccelAxG:  Float = 0f; private set  // latest longitudinal g (gravity-removed)
+    @Volatile var hudAccelAyG:  Float = 0f; private set  // latest lateral g
+    @Volatile var hudAccelTotalG: Float = 0f; private set  // latest total net g
+    @Volatile var hudLastEventDir: String? = null; private set
+    @Volatile var hudLastEventPeakG: Float = 0f; private set
+    @Volatile var hudLastEventTimeMs: Long = 0L; private set
+
+    // ── HUD data accessors (read by MainActivity to build HudState) ───────────────
+    val hudRoadState: String get() =
+        if (::roadMonitor.isInitialized) roadMonitor.currentState.name else "---"
+    val hudRoadRms: Float get() =
+        if (::roadMonitor.isInitialized) roadMonitor.currentRmsMs2 else 0f
+    val hudPitchDeg: Float get() {
+        if (!::gravityProvider.isInitialized || !gravityProvider.isReady) return 0f
+        val mag = gravityProvider.gravityMagnitude.coerceAtLeast(0.01f)
+        return Math.toDegrees(kotlin.math.asin((gravityProvider.gx / mag).toDouble().coerceIn(-1.0, 1.0))).toFloat()
+    }
+    val hudRollDeg: Float get() {
+        if (!::gravityProvider.isInitialized || !gravityProvider.isReady) return 0f
+        val mag = gravityProvider.gravityMagnitude.coerceAtLeast(0.01f)
+        return Math.toDegrees(kotlin.math.asin((gravityProvider.gy / mag).toDouble().coerceIn(-1.0, 1.0))).toFloat()
+    }
     // ── Module 7 fields ───────────────────────────────────────────────────────────
     private var loopRecorder:  LoopRecorder? = null
     var dvrCamera:   DVRCameraManager?   = null
@@ -285,6 +309,17 @@ class RecordingService : LifecycleService() {
                     onAccelFanOut = { rec ->
                         roadMonitor.onAccelSample(rec)
                         collisionDetector.onAccelSample(rec)
+                        // HUD snapshot: gravity-subtracted accel in g
+                        val gx = gravityProvider.gx
+                        val gy = gravityProvider.gy
+                        val gz = gravityProvider.gz
+                        val axNet = rec.ax - gx
+                        val ayNet = rec.ay - gy
+                        val azNet = rec.az - gz
+                        val g = 9.80665f
+                        hudAccelAxG   = axNet / g
+                        hudAccelAyG   = ayNet / g
+                        hudAccelTotalG = kotlin.math.sqrt(axNet*axNet + ayNet*ayNet + azNet*azNet) / g
                     },
                     onGyroFanOut  = { rec ->
                         collisionDetector.onGyroSample(rec)
@@ -536,6 +571,10 @@ class RecordingService : LifecycleService() {
     // ── Module 5: impact event handler ────────────────────────────────────────────
     private fun handleImpactEvent(event: ImpactEvent) {
         Log.w(TAG, "Impact event: ${event.direction}  peakG=${event.peakG}g  road=${event.roadState}")
+        // HUD snapshot for event display
+        hudLastEventDir     = event.direction
+        hudLastEventPeakG   = event.peakG
+        hudLastEventTimeMs  = System.currentTimeMillis()
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             // FIX A: Both eventsLog write AND custody event append are now
             // inside try-catch.  Previously appendCustodyEvent was unprotected

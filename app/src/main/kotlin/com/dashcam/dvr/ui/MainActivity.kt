@@ -326,30 +326,40 @@ class MainActivity : AppCompatActivity() {
         // Combined update runs driven data flow
         lifecycleScope.launch {
             svc.gpsData.collectLatest { gpsRec ->
-                hudOverlay.update(
-                    recording  = svc.state.value is RecordingService.ServiceState.Recording,
-                    elapsed    = svc.elapsedSeconds.value,
-                    gpsFix     = svc.hasGpsFix.value,
-                    gps        = gpsRec,
-                    protected  = svc.protectedCount.value,
-                    blink      = blinkState
-                )
+                hudOverlay.update(buildHudState(svc, gpsRec))
             }
         }
 
         // HUD elapsed sync: driven by the same flow as tvTimer so both show identical seconds
         lifecycleScope.launch {
             svc.elapsedSeconds.collectLatest { elapsed ->
-                hudOverlay.update(
-                    recording  = svc.state.value is RecordingService.ServiceState.Recording,
-                    elapsed    = elapsed,
-                    gpsFix     = svc.hasGpsFix.value,
-                    gps        = svc.gpsData.value,
-                    protected  = svc.protectedCount.value,
-                    blink      = blinkState
-                )
+                hudOverlay.update(buildHudState(svc))
             }
         }
+    }
+
+    private fun buildHudState(
+        svc: RecordingService,
+        gpsOverride: com.dashcam.dvr.telemetry.model.GpsRecord? = null
+    ): com.dashcam.dvr.ui.hud.HudState {
+        return com.dashcam.dvr.ui.hud.HudState(
+            isRecording    = svc.state.value is RecordingService.ServiceState.Recording,
+            elapsedSeconds = svc.elapsedSeconds.value,
+            blinkVisible   = blinkState,
+            hasGpsFix      = svc.hasGpsFix.value,
+            gps            = gpsOverride ?: svc.gpsData.value,
+            accelAxG       = svc.hudAccelAxG,
+            accelAyG       = svc.hudAccelAyG,
+            accelTotalG    = svc.hudAccelTotalG,
+            pitchDeg       = svc.hudPitchDeg,
+            rollDeg        = svc.hudRollDeg,
+            roadState      = svc.hudRoadState,
+            roadRmsMs2     = svc.hudRoadRms,
+            lastEventDirection = svc.hudLastEventDir,
+            lastEventPeakG     = svc.hudLastEventPeakG,
+            lastEventTimeMs    = svc.hudLastEventTimeMs,
+            protectedCount     = svc.protectedCount.value
+        )
     }
 
     // Service state observer updates buttons timer
@@ -371,13 +381,14 @@ class MainActivity : AppCompatActivity() {
                         btnEvent.isEnabled = false
                         tvTimer.text = "00:00:00"
                         // Reset HUD to standby
-                        hudOverlay.update(
-                            recording = false, elapsed = 0L,
-                            gpsFix    = recordingService?.hasGpsFix?.value ?: false,
-                            gps       = recordingService?.gpsData?.value,
-                            protected = recordingService?.protectedCount?.value ?: 0,
-                            blink     = false
-                        )
+                        hudOverlay.update(com.dashcam.dvr.ui.hud.HudState(
+                            isRecording    = false,
+                            elapsedSeconds = 0L,
+                            blinkVisible   = false,
+                            hasGpsFix      = recordingService?.hasGpsFix?.value ?: false,
+                            gps            = recordingService?.gpsData?.value,
+                            protectedCount = recordingService?.protectedCount?.value ?: 0
+                        ))
                     }
                     is RecordingService.ServiceState.Error -> {
                         Toast.makeText(this@MainActivity,
